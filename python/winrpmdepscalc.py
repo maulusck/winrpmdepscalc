@@ -332,7 +332,8 @@ def configure_settings():
 
 
 def cleanup_files():
-    files = [Config.LOCAL_REPOMD_FILE, Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
+    files = [Config.LOCAL_REPOMD_FILE,
+             Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
     deleted_any = False
     for f in files:
         if os.path.exists(f):
@@ -351,7 +352,8 @@ def check_and_refresh_metadata():
     Implements workflow option 3:
     Conditional re-fetch based on metadata availability.
     """
-    files = [Config.LOCAL_REPOMD_FILE, Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
+    files = [Config.LOCAL_REPOMD_FILE,
+             Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
 
     missing_files = [f for f in files if not os.path.exists(f)]
 
@@ -365,9 +367,11 @@ def check_and_refresh_metadata():
         download_file_powershell(repomd_url, Config.LOCAL_REPOMD_FILE)
 
         repomd_root = parse_xml(Config.LOCAL_REPOMD_FILE)
-        primary_url = get_primary_location_url(repomd_root, Config.REPO_BASE_URL)
+        primary_url = get_primary_location_url(
+            repomd_root, Config.REPO_BASE_URL)
         if not primary_url:
-            raise RuntimeError("Could not find primary metadata URL in repomd.xml")
+            raise RuntimeError(
+                "Could not find primary metadata URL in repomd.xml")
 
         download_file_powershell(primary_url, Config.LOCAL_XZ_FILE)
 
@@ -406,7 +410,8 @@ def main():
         print(f"{Colors.FG_YELLOW}9) Configure settings{Colors.RESET}")
         print(f"{Colors.FG_YELLOW}0) Exit{Colors.RESET}")
 
-        choice = input(f"{Colors.FG_CYAN}Enter your choice: {Colors.RESET}").strip()
+        choice = input(
+            f"{Colors.FG_CYAN}Enter your choice: {Colors.RESET}").strip()
 
         if choice == "1":
             start = input(
@@ -420,7 +425,8 @@ def main():
             print_packages_tabular(filtered)
 
         elif choice == "2":
-            pkg = input(f"{Colors.FG_CYAN}Enter package name: {Colors.RESET}").strip()
+            pkg = input(
+                f"{Colors.FG_CYAN}Enter package name: {Colors.RESET}").strip()
             if pkg not in dep_map:
                 print(f"{Colors.FG_RED}Package '{pkg}' not found.{Colors.RESET}")
                 continue
@@ -473,7 +479,8 @@ def main():
                 package_names = [
                     pkg.strip() for pkg in user_input.split(",") if pkg.strip()
                 ]
-                valid_packages = [pkg for pkg in package_names if pkg in all_packages]
+                valid_packages = [
+                    pkg for pkg in package_names if pkg in all_packages]
                 missing_packages = [
                     pkg for pkg in package_names if pkg not in all_packages
                 ]
