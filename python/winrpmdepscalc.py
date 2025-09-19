@@ -5,6 +5,7 @@ import gzip
 import bz2
 import magic
 import fnmatch
+from tqdm import tqdm
 from urllib.parse import urljoin
 import xml.etree.ElementTree as ET
 from collections import deque, defaultdict
@@ -169,10 +170,12 @@ def download_file_powershell(url, output_file):
     $wc.DownloadFile('{url}', '{output_file}')
     """
     ps_command = ["powershell", "-NoProfile", "-Command", ps_script]
-    print(f"{Colors.FG_CYAN}Downloading {url} to {output_file} ...{Colors.RESET}")
+    tqdm.write(
+        f"{Colors.FG_CYAN}Downloading {url} to {output_file} ...{Colors.RESET}")
     result = subprocess.run(ps_command, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"{Colors.FG_RED}PowerShell error output:\n{result.stderr}{Colors.RESET}")
+        tqdm.write(
+            f"{Colors.FG_RED}PowerShell error output:\n{result.stderr}{Colors.RESET}")
         raise RuntimeError(f"Failed to download {url}")
 
 
@@ -263,22 +266,6 @@ def get_package_rpm_urls(root_element, base_url, package_names):
     return rpm_urls
 
 
-def download_rpms(rpm_urls, download_dir):
-    os.makedirs(download_dir, exist_ok=True)
-    for pkg_name, url in rpm_urls:
-        filename = os.path.basename(url)
-        dest_path = os.path.join(download_dir, filename)
-        if os.path.exists(dest_path):
-            print(f"{Colors.FG_YELLOW}Already downloaded: {filename}{Colors.RESET}")
-            continue
-        try:
-            print(f"{Colors.FG_CYAN}Downloading {filename}...{Colors.RESET}")
-            download_file_powershell(url, dest_path)
-            print(f"{Colors.FG_GREEN}Downloaded: {filename}{Colors.RESET}")
-        except Exception as e:
-            print(f"{Colors.FG_RED}Failed to download {filename}: {e}{Colors.RESET}")
-
-
 def print_packages_tabular(packages, columns=None, column_width=None):
     if not packages:
         print(f"{Colors.FG_RED}No packages found.{Colors.RESET}")
@@ -360,30 +347,36 @@ def download_packages(package_names, dep_map, primary_root, download_deps=False)
             deps = resolve_all_dependencies(pkg, dep_map)
             if deps:
                 packages_to_download.update(deps)
-    print(f"{Colors.FG_CYAN}Downloading the following packages: {', '.join(packages_to_download)}{Colors.RESET}")
+    tqdm.write(
+        f"{Colors.FG_CYAN}Downloading the following packages: {', '.join(packages_to_download)}{Colors.RESET}")
+
+    all_rpm_urls = []
     for pkg in packages_to_download:
-        if pkg not in package_names:
-            print(
-                f"{Colors.FG_CYAN}Downloading dependencies for {pkg}...{Colors.RESET}")
         rpm_urls = get_package_rpm_urls(
             primary_root, Config.REPO_BASE_URL, [pkg])
         if not rpm_urls:
-            print(f"{Colors.FG_RED}No RPM URLs found for {pkg}{Colors.RESET}")
+            tqdm.write(
+                f"{Colors.FG_RED}No RPM URLs found for {pkg}{Colors.RESET}")
             continue
-        for _, url in rpm_urls:
+        all_rpm_urls.extend(rpm_urls)
+
+    with tqdm(total=len(all_rpm_urls), desc="Downloading packages", unit="pkg", position=0, leave=True) as pbar:
+        for _, url in all_rpm_urls:
             dest_path = os.path.join(
                 Config.DOWNLOAD_DIR, os.path.basename(url))
             if os.path.exists(dest_path):
-                print(
+                tqdm.write(
                     f"{Colors.FG_YELLOW}Already downloaded: {os.path.basename(url)}{Colors.RESET}")
-            else:
-                try:
-                    download_file_powershell(url, dest_path)
-                    print(
-                        f"{Colors.FG_GREEN}Downloaded: {os.path.basename(url)}{Colors.RESET}")
-                except Exception as e:
-                    print(
-                        f"{Colors.FG_RED}Failed to download {os.path.basename(url)}: {e}{Colors.RESET}")
+                pbar.update(1)
+                continue
+            try:
+                download_file_powershell(url, dest_path)
+                tqdm.write(
+                    f"{Colors.FG_GREEN}Downloaded: {os.path.basename(url)}{Colors.RESET}")
+            except Exception as e:
+                tqdm.write(
+                    f"{Colors.FG_RED}Failed to download {os.path.basename(url)}: {e}{Colors.RESET}")
+            pbar.update(1)
 
 
 def main():
@@ -455,7 +448,7 @@ def main():
                 packages.extend(
                     metadata_handler.filter_packages_by_input(filter_str.strip()))
             download_deps = input(
-                f"{Colors.FG_CYAN}Do you want to download dependencies as well? (y/n): {Colors.RESET}").strip().lower() in ['y', 'yes', '1', 'true']
+                f"{Colors.FG_CYAN}Do you want to download dependencies as well? (y/N): {Colors.RESET}").strip().lower() in ['y', 'yes', '1', 'true']
             download_packages(packages, metadata_handler.dep_map,
                               primary_root, download_deps)
         elif choice == "9":
