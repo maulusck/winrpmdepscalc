@@ -1,6 +1,5 @@
 import argparse
 import fnmatch
-import concurrent.futures
 import functools
 import logging
 import lzma
@@ -21,8 +20,6 @@ from tqdm import tqdm
 import yaml
 import urllib3
 import subprocess
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class LogColors:
@@ -587,29 +584,32 @@ def prompt_package_selection(metadata: MetadataManager) -> List[str]:
     return sorted(all_pkgs)
 
 
-def list_packages(metadata: MetadataManager, *_) -> None:
-    patterns_input = input(
-        f"{LogColors.CYAN}Enter wildcard filters (comma-separated): {LogColors.RESET}").strip()
-    patterns = [p.strip() for p in patterns_input.split(",") if p.strip()]
-    packages = metadata.filter_packages(patterns)
+def list_packages(metadata: MetadataManager, package_patterns: Optional[List[str]] = None) -> None:
+    if not package_patterns:
+        patterns_input = input(
+            f"{LogColors.CYAN}Enter wildcard filters (comma-separated): {LogColors.RESET}").strip()
+        package_patterns = [p.strip()
+                            for p in patterns_input.split(",") if p.strip()]
+    packages = metadata.filter_packages(package_patterns)
     print_packages_tabular(
         packages, metadata.config.PACKAGE_COLUMNS, metadata.config.PACKAGE_COLUMN_WIDTH)
 
 
-def calc_dependencies(metadata: MetadataManager, package_name: Optional[str] = None, *_) -> None:
-    if package_name is None:
-        package_name = input(
-            f"{LogColors.CYAN}Enter package name: {LogColors.RESET}").strip()
-    if not package_name or package_name not in metadata.dep_map:
-        _logger.error("Package not found.")
+def calc_dependencies(metadata: MetadataManager) -> None:
+    selected = prompt_package_selection(metadata)
+    if not selected:
         return
-    deps = metadata.resolve_all_dependencies(package_name)
-    if not deps:
-        _logger.error("Cannot resolve dependencies.")
-        return
-    _logger.info(f"Dependencies for {package_name}:")
-    print_packages_tabular(sorted(
-        deps), metadata.config.PACKAGE_COLUMNS, metadata.config.PACKAGE_COLUMN_WIDTH)
+    for package_name in selected:
+        if package_name not in metadata.dep_map:
+            _logger.error(f"Package '{package_name}' not found.")
+            continue
+        deps = metadata.resolve_all_dependencies(package_name)
+        if not deps:
+            _logger.error(f"Cannot resolve dependencies for {package_name}.")
+            continue
+        _logger.info(f"Dependencies for {package_name}:")
+        print_packages_tabular(sorted(
+            deps), metadata.config.PACKAGE_COLUMNS, metadata.config.PACKAGE_COLUMN_WIDTH)
 
 
 def refresh_metadata(metadata: MetadataManager, *_) -> None:
@@ -620,41 +620,30 @@ def cleanup_metadata(metadata: MetadataManager, *_) -> None:
     metadata.cleanup_files()
 
 
-def list_rpm_urls(metadata: MetadataManager, primary_root: Optional[ET.Element] = None) -> None:
-    if primary_root is None:
-        primary_root = metadata.primary_root
-    if primary_root is None:
-        _logger.error(
-            "Primary metadata XML not loaded. Refresh metadata first.")
-        return
-
-    selected = prompt_package_selection(metadata)
+def list_rpm_urls(metadata: MetadataManager, package_names: Optional[List[str]] = None) -> None:
+    if not package_names or len(package_names) == 0:
+        selected = prompt_package_selection(metadata)
+    else:
+        selected = package_names
     if not selected:
         return
-
-    urls = get_package_rpm_urls(primary_root, metadata.config.REPO_BASE_URL,
+    urls = get_package_rpm_urls(metadata.primary_root, metadata.config.REPO_BASE_URL,
                                 selected, only_latest=metadata.config.ONLY_LATEST_VERSION)
     if not urls:
         _logger.error("No RPM URLs found.")
         return
-
     for pkg, url in urls:
         print(f"{LogColors.MAGENTA}{pkg:<30}{LogColors.CYAN}{url}{LogColors.RESET}")
 
 
-def download_packages_ui(metadata: MetadataManager, primary_root: Optional[ET.Element] = None) -> None:
-    if primary_root is None:
-        primary_root = metadata.primary_root
-    if primary_root is None:
-        _logger.error(
-            "Primary metadata XML not loaded. Refresh metadata first.")
-        return
-
-    selected = prompt_package_selection(metadata)
+def download_packages_ui(metadata: MetadataManager, package_names: Optional[List[str]] = None) -> None:
+    if not package_names or len(package_names) == 0:
+        selected = prompt_package_selection(metadata)
+    else:
+        selected = package_names
     if not selected:
         return
-
-    download_packages(selected, metadata.dep_map, primary_root,
+    download_packages(selected, metadata.dep_map, metadata.primary_root,
                       metadata.config, metadata.downloader, download_deps=False)
 
 
@@ -712,26 +701,26 @@ def run_interactive_menu(metadata: MetadataManager, config_path: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Windows RPM Package Metadata Tool")
-    parser.add_argument('--config', '-c', type=Path,
+    parser.add_argument('-c', '--config', type=Path,
                         default=Path("config.yaml"), help="YAML config file path")
     parser.add_argument('--write-default-config', action='store_true',
                         help="Write default config.yaml and exit")
     parser.add_argument('--list-packages', action='store_true',
-                        help="List packages by wildcard or list")
-    parser.add_argument('--calc-deps', metavar='PACKAGE',
-                        help="Calculate dependencies for a package")
+                        help="List packages (interactive prompt)")
+    parser.add_argument('--calc-deps', action='store_true',
+                        help="Calculate dependencies (interactive prompt)")
     parser.add_argument('--refresh-meta', action='store_true',
                         help="Refresh metadata files if missing")
     parser.add_argument('--cleanup-meta', action='store_true',
                         help="Cleanup metadata files")
     parser.add_argument('--list-rpm-urls', action='store_true',
-                        help="List RPM URLs for packages")
+                        help="List RPM URLs for packages (interactive prompt)")
     parser.add_argument('--download', action='store_true',
-                        help="Download packages")
+                        help="Download packages (interactive prompt)")
     parser.add_argument('--configure', action='store_true',
                         help="Configure settings interactively")
-    parser.add_argument('--no-interactive',
-                        action='store_true', help="Run non-interactive")
+    parser.add_argument('--no-interactive', action='store_true',
+                        help="Disable interactive menu fallback")
     return parser.parse_args()
 
 
@@ -748,52 +737,48 @@ def main() -> None:
 
         if config.SKIP_SSL_VERIFY:
             _logger.warning(
-                "SSL verification is disabled; insecure HTTPS requests will not be verified.")
+                "SSL verification disabled; HTTPS requests insecure.")
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
         downloader = Downloader(
             config.DOWNLOADER, skip_ssl_verify=config.SKIP_SSL_VERIFY)
         metadata = MetadataManager(config, downloader)
 
-        cli_actions_need_meta = any([
-            args.list_packages,
-            args.calc_deps,
-            args.refresh_meta,
-            args.list_rpm_urls,
-            args.download,
-        ])
+        needs_metadata = any([args.list_packages, args.calc_deps is not None,
+                              args.refresh_meta, args.list_rpm_urls, args.download])
 
-        if cli_actions_need_meta:
+        if needs_metadata:
             metadata.check_and_refresh_metadata()
-
-        primary_root = metadata.primary_root if cli_actions_need_meta else None
 
         if args.list_packages:
             list_packages(metadata)
             return
-        elif args.calc_deps:
-            if args.calc_deps in metadata.dep_map:
-                calc_dependencies(metadata, args.calc_deps)
-            else:
-                _logger.error(f"Package '{args.calc_deps}' not found.")
+
+        if args.calc_deps:
+            calc_dependencies(metadata)
             return
-        elif args.refresh_meta:
+
+        if args.refresh_meta:
             refresh_metadata(metadata)
             return
-        elif args.cleanup_meta:
+
+        if args.cleanup_meta:
             cleanup_metadata(metadata)
             return
 
         if args.list_rpm_urls:
-            list_rpm_urls(metadata, primary_root)
+            list_rpm_urls(metadata)
             return
-        elif args.download:
-            download_packages_ui(metadata, primary_root)
+
+        if args.download:
+            download_packages_ui(metadata)
             return
-        elif args.configure:
+
+        if args.configure:
             configure_settings(metadata, None, args.config)
             return
-        elif not args.no_interactive:
+
+        if not args.no_interactive:
             if not metadata.metadata_loaded:
                 metadata.check_and_refresh_metadata()
             run_interactive_menu(metadata, args.config)
