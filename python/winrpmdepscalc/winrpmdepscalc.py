@@ -78,8 +78,8 @@ class MetadataHandler:
     def check_and_refresh_metadata(self):
         files = [Config.LOCAL_REPOMD_FILE,
                  Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
-        if any(not os.path.exists(f) for f in files):
-            missing = [f for f in files if not os.path.exists(f)]
+        missing = [f for f in files if not os.path.exists(f)]
+        if missing:
             print(
                 f"{Colors.FG_YELLOW}Metadata files missing or removed: {', '.join(missing)}{Colors.RESET}")
             print(f"{Colors.FG_CYAN}Refreshing metadata files now.{Colors.RESET}")
@@ -119,13 +119,13 @@ class MetadataHandler:
               "rpm": "http://linux.duke.edu/metadata/rpm"}
         provides = defaultdict(set)
         requires = {}
-        packages_with_format = []
 
+        packages_with_format = []
         for pkg in root.findall("common:package", ns):
-            name = pkg.find("common:name", ns)
-            if name is None:
+            name_elem = pkg.find("common:name", ns)
+            if name_elem is None:
                 continue
-            pkg_name = name.text
+            pkg_name = name_elem.text
             fmt = pkg.find("common:format", ns)
             if fmt is None:
                 requires[pkg_name] = set()
@@ -317,12 +317,12 @@ def resolve_all_dependencies(pkg_name, dep_map):
 
 
 def edit_configuration():
-    keys = [k for k in dir(Config) if k.isupper()]
-    key_map = {str(i+1): k for i, k in enumerate(sorted(keys))}
+    keys = sorted(k for k in dir(Config) if k.isupper())
+    key_map = {str(i+1): k for i, k in enumerate(keys)}
     while True:
         Config.print_config()
-        print(f"{Colors.FG_YELLOW}Select the config key to change by number (or press Enter to return to menu):{Colors.RESET}")
-        for i, key in enumerate(sorted(keys), 1):
+        print(f"{Colors.FG_YELLOW}Select the config key to change by number (or press Enter to return):{Colors.RESET}")
+        for i, key in enumerate(keys, 1):
             print(f"  {Colors.FG_CYAN}{i}{Colors.RESET}) {key}")
         choice = input(
             f"{Colors.FG_CYAN}Choice (number): {Colors.RESET}").strip()
@@ -330,7 +330,7 @@ def edit_configuration():
             break
         if choice not in key_map:
             print(
-                f"{Colors.FG_RED}Invalid choice '{choice}'. Please enter a valid number.{Colors.RESET}")
+                f"{Colors.FG_RED}Invalid choice '{choice}', enter a valid number.{Colors.RESET}")
             continue
         key = key_map[choice]
         current = getattr(Config, key)
@@ -351,6 +351,26 @@ def edit_configuration():
                 continue
             new_value = int(new_value)
         Config.set_config(key, new_value)
+
+
+def resolve_package_list_with_prompt(mh):
+    filters = input(
+        f"{Colors.FG_CYAN}Enter package names or wildcards (comma-separated): {Colors.RESET}").strip()
+    packages = []
+    for f in filters.split(','):
+        packages.extend(mh.filter_packages(f.strip()))
+    if not packages:
+        print(f"{Colors.FG_RED}No packages matched the filter.{Colors.RESET}")
+        return []
+    include_deps = input(
+        f"{Colors.FG_CYAN}Include dependencies as well? (y/N): {Colors.RESET}").strip().lower() in ['y', 'yes', '1', 'true']
+    all_packages = set(packages)
+    if include_deps:
+        for pkg in packages:
+            deps = resolve_all_dependencies(pkg, mh.dep_map)
+            if deps:
+                all_packages.update(deps)
+    return sorted(all_packages)
 
 
 def download_packages(package_names, dep_map, primary_root, download_deps=False):
@@ -393,70 +413,6 @@ def download_packages(package_names, dep_map, primary_root, download_deps=False)
             pbar.update(1)
 
 
-def resolve_package_list_with_prompt(mh):
-    filters = input(
-        f"{Colors.FG_CYAN}Enter package names or wildcards (comma-separated): {Colors.RESET}").strip()
-    packages = []
-    for f in filters.split(','):
-        packages.extend(mh.filter_packages(f.strip()))
-
-    if not packages:
-        print(f"{Colors.FG_RED}No packages matched the filter.{Colors.RESET}")
-        return []
-
-    include_deps = input(
-        f"{Colors.FG_CYAN}Include dependencies as well? (y/N): {Colors.RESET}").strip().lower() in ['y', 'yes', '1', 'true']
-
-    all_packages = set(packages)
-    if include_deps:
-        for pkg in packages:
-            deps = resolve_all_dependencies(pkg, mh.dep_map)
-            if deps:
-                all_packages.update(deps)
-
-    return sorted(all_packages)
-
-
-def main():
-    mh = MetadataHandler()
-    mh.check_and_refresh_metadata()
-    primary_root = parse_xml(Config.LOCAL_XML_FILE)
-    mh.all_packages = get_all_packages(primary_root)
-    mh.requires_map, mh.provides_map, mh.dep_map = mh.build_maps(primary_root)
-
-    menu_options = {
-        "1": list_packages,
-        "2": calculate_dependencies,
-        "3": refresh_metadata,
-        "4": cleanup_metadata,
-        "5": list_rpm_urls,
-        "6": download_packages_ui,
-        "9": configure_settings,
-        "0": exit_program
-    }
-
-    while True:
-        print(f"\n{Colors.BOLD}{Colors.FG_BLUE}--- MENU ---{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}1) List packages by wildcard or list{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}2) Calculate dependencies for package{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}3) Refresh metadata files if missing{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}4) Cleanup metadata files{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}5) List RPM URLs by wildcard or list{Colors.RESET}")
-        print(
-            f"{Colors.FG_YELLOW}6) Download packages by wildcard or list{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}9) Configure settings{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}0) Exit{Colors.RESET}")
-
-        choice = input(
-            f"{Colors.FG_CYAN}Enter your choice: {Colors.RESET}").strip()
-
-        action = menu_options.get(choice)
-        if action:
-            action(mh, primary_root)
-        else:
-            print(f"{Colors.FG_RED}Invalid choice, please try again.{Colors.RESET}")
-
-
 def list_packages(mh, _):
     filters = input(
         f"{Colors.FG_CYAN}Enter filter string(s) with wildcards (comma-separated): {Colors.RESET}").strip()
@@ -494,15 +450,12 @@ def list_rpm_urls(mh, primary_root):
     all_packages = resolve_package_list_with_prompt(mh)
     if not all_packages:
         return
-
     rpm_urls = get_package_rpm_urls(
         primary_root, Config.REPO_BASE_URL, all_packages)
-
     if not rpm_urls:
         print(
             f"{Colors.FG_RED}No RPM URLs found for the selected packages.{Colors.RESET}")
         return
-
     for pkg, url in rpm_urls:
         print(f"{Colors.FG_MAGENTA}{pkg:<30}{Colors.FG_CYAN}{url}{Colors.RESET}")
 
@@ -511,21 +464,56 @@ def download_packages_ui(mh, primary_root):
     all_packages = resolve_package_list_with_prompt(mh)
     if not all_packages:
         return
-
-    download_packages(all_packages, mh.dep_map, primary_root,
-                      download_deps=False)  # We already included deps above
+    download_packages(all_packages, mh.dep_map,
+                      primary_root, download_deps=False)
 
 
 def configure_settings(mh=None, primary_root=None):
-    # mh and primary_root unused but accepted for uniform signature
-    _ = mh
-    _ = primary_root
     edit_configuration()
 
 
 def exit_program(mh=None, primary_root=None):
     print(f"{Colors.FG_GREEN}Goodbye!{Colors.RESET}")
     exit(0)
+
+
+def main():
+    mh = MetadataHandler()
+    mh.check_and_refresh_metadata()
+    primary_root = parse_xml(Config.LOCAL_XML_FILE)
+    mh.all_packages = get_all_packages(primary_root)
+    mh.requires_map, mh.provides_map, mh.dep_map = mh.build_maps(primary_root)
+
+    menu_options = {
+        "1": list_packages,
+        "2": calculate_dependencies,
+        "3": refresh_metadata,
+        "4": cleanup_metadata,
+        "5": list_rpm_urls,
+        "6": download_packages_ui,
+        "9": configure_settings,
+        "0": exit_program
+    }
+
+    while True:
+        print(f"\n{Colors.BOLD}{Colors.FG_BLUE}--- MENU ---{Colors.RESET}")
+        print(f"{Colors.FG_YELLOW}1) List packages by wildcard or list{Colors.RESET}")
+        print(f"{Colors.FG_YELLOW}2) Calculate dependencies for package{Colors.RESET}")
+        print(f"{Colors.FG_YELLOW}3) Refresh metadata files if missing{Colors.RESET}")
+        print(f"{Colors.FG_YELLOW}4) Cleanup metadata files{Colors.RESET}")
+        print(f"{Colors.FG_YELLOW}5) List RPM URLs by wildcard or list{Colors.RESET}")
+        print(
+            f"{Colors.FG_YELLOW}6) Download packages by wildcard or list{Colors.RESET}")
+        print(f"{Colors.FG_YELLOW}9) Configure settings{Colors.RESET}")
+        print(f"{Colors.FG_YELLOW}0) Exit{Colors.RESET}")
+
+        choice = input(
+            f"{Colors.FG_CYAN}Enter your choice: {Colors.RESET}").strip()
+        action = menu_options.get(choice)
+        if action:
+            action(mh, primary_root)
+        else:
+            print(f"{Colors.FG_RED}Invalid choice, please try again.{Colors.RESET}")
 
 
 if __name__ == "__main__":
