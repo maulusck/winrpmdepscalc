@@ -1,7 +1,0 @@
-REPO_BASE_URL: "https://dl.fedoraproject.org/pub/epel/9/Everything/x86_64/"
-DOWNLOAD_DIR: "my_rpms"
-DOWNLOADER: "powershell"
-ONLY_LATEST_VERSION: true
-SUPPORT_WEAK_DEPS: false
-PACKAGE_COLUMNS: 4
-PACKAGE_COLUMN_WIDTH: 30
