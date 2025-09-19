@@ -8,7 +8,6 @@ import xml.etree.ElementTree as ET
 from collections import deque, defaultdict
 from urllib.parse import urljoin
 import urllib.request
-
 import magic
 from tqdm import tqdm
 import requests
@@ -40,6 +39,8 @@ class DownloaderType(Enum):
 
 
 class Downloader:
+    """Handles downloading files using different download methods."""
+
     allowed_downloaders = [DownloaderType.POWERSHELL, DownloaderType.PYTHON]
 
     def __init__(self, downloader_type="powershell"):
@@ -53,43 +54,56 @@ class Downloader:
 
     def download(self, url, output_file, proxy_url=None):
         if self.downloader_type == DownloaderType.POWERSHELL:
-            self._download_powershell(url, output_file)
+            self._download_with_powershell(url, output_file)
         elif self.downloader_type == DownloaderType.PYTHON:
-            self._download_python(url, output_file, proxy_url)
+            self._download_with_python(url, output_file, proxy_url)
         else:
             raise RuntimeError(
                 f"Unsupported downloader {self.downloader_type}")
 
-    def _download_powershell(self, url, output_file):
+    def _download_with_powershell(self, url, output_file):
+        """Downloads a file using PowerShell WebClient to honor system proxy settings."""
         ps_script = f"""
-        $wc = New-Object System.Net.WebClient
-        $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
+            $wc = New-Object System.Net.WebClient
+            $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
 
-        $progress = [System.Management.Automation.ProgressRecord]::new(1, "Downloading", "{url}")
-        $wc.DownloadProgressChanged += {{
-            param($sender, $e)
-            $progress.PercentComplete = $e.ProgressPercentage
-            Write-Progress -ProgressRecord $progress
-        }}
-        $wc.DownloadFileAsync('{url}', '{output_file}')
-        while ($wc.IsBusy) {{
-            Start-Sleep -Milliseconds 100
-        }}
+            $progress = [System.Management.Automation.ProgressRecord]::new(1, "Downloading", "{url}")
+            $wc.DownloadProgressChanged += {{
+                param($sender, $e)
+                $progress.PercentComplete = $e.ProgressPercentage
+                Write-Progress -ProgressRecord $progress
+            }}
+            $wc.DownloadFileAsync('{url}', '{output_file}')
+            while ($wc.IsBusy) {{
+                Start-Sleep -Milliseconds 100
+            }}
         """
         tqdm.write(
             f"{Colors.FG_CYAN}Downloading {url} to {output_file} with PowerShell...{Colors.RESET}")
-        cmd = ["powershell", "-NoProfile", "-Command", ps_script]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script], capture_output=True, text=True)
         if result.returncode != 0:
             tqdm.write(
-                f"{Colors.FG_RED}PowerShell error output:\n{result.stderr}{Colors.RESET}")
-            raise RuntimeError(f"Failed to download {url}")
+                f"{Colors.FG_RED}PowerShell error:\n{result.stderr}{Colors.RESET}")
+            raise RuntimeError(f"Failed to download {url} via PowerShell")
 
-    def _download_python(self, url, output_file, proxy_url=None):
-        proxies = {"https": proxy_url} if proxy_url else {}
-        if not proxy_url:
+    def _download_with_python(self, url, output_file, proxy_url=None):
+        """
+        Downloads a file using Python requests with support for HTTP and HTTPS proxies.
+        """
+        proxies = {}
+
+        if proxy_url:
+
+            proxies["http"] = proxy_url
+            proxies["https"] = proxy_url
+        else:
+
             system_proxies = urllib.request.getproxies()
+            http_proxy = system_proxies.get("http")
             https_proxy = system_proxies.get("https")
+            if http_proxy:
+                proxies["http"] = http_proxy
             if https_proxy:
                 proxies["https"] = https_proxy
 
@@ -97,12 +111,13 @@ class Downloader:
         session.auth = HttpNegotiateAuth()
 
         tqdm.write(
-            f"{Colors.FG_CYAN}Using HTTPS proxy: {proxies.get('https', 'None')}{Colors.RESET}")
-        with session.get(url, stream=True, proxies=proxies or None, verify=False) as r:
-            r.raise_for_status()
-            total = int(r.headers.get("content-length", 0))
-            with open(output_file, "wb") as f, tqdm(total=total, unit="iB", unit_scale=True, desc=f"Downloading {url}") as bar:
-                for chunk in r.iter_content(1024):
+            f"{Colors.FG_CYAN}Using proxies: HTTP={proxies.get('http', 'None')}, HTTPS={proxies.get('https', 'None')}{Colors.RESET}")
+
+        with session.get(url, stream=True, proxies=proxies or None, verify=False) as response:
+            response.raise_for_status()
+            total_size = int(response.headers.get("content-length", 0))
+            with open(output_file, "wb") as f, tqdm(total=total_size, unit="iB", unit_scale=True, desc=f"Downloading {url}") as bar:
+                for chunk in response.iter_content(1024):
                     if chunk:
                         f.write(chunk)
                         bar.update(len(chunk))
@@ -119,7 +134,6 @@ class Config:
     DOWNLOAD_DIR = "rpms"
     SUPPORT_WEAK_DEPS = False
     ONLY_LATEST_VERSION = True
-
     DOWNLOADER = "powershell"
 
     @classmethod
@@ -138,11 +152,10 @@ class Config:
             print(f"{Colors.FG_RED}Config key '{key}' not found.{Colors.RESET}")
             return False
         if key == "DOWNLOADER":
-
-            lowers = [dt.value for dt in Downloader.allowed_downloaders]
-            if value.lower() not in lowers:
+            allowed = [dt.value for dt in Downloader.allowed_downloaders]
+            if value.lower() not in allowed:
                 print(
-                    f"{Colors.FG_RED}Invalid value for DOWNLOADER. Allowed values: {', '.join(lowers)}{Colors.RESET}")
+                    f"{Colors.FG_RED}Invalid DOWNLOADER value. Allowed: {', '.join(allowed)}{Colors.RESET}")
                 return False
             setattr(cls, key, value.lower())
             print(f"{Colors.FG_GREEN}Updated {key} to: {value.lower()}{Colors.RESET}")
@@ -154,6 +167,8 @@ class Config:
 
 
 class MetadataHandler:
+    """Manages metadata related to packages and their dependency relationships."""
+
     def __init__(self):
         self.all_packages = []
         self.requires_map = {}
@@ -161,6 +176,7 @@ class MetadataHandler:
         self.dep_map = {}
 
     def reset(self):
+        """Clear all cached metadata state."""
         self.all_packages.clear()
         self.requires_map.clear()
         self.provides_map.clear()
@@ -168,34 +184,41 @@ class MetadataHandler:
         print(f"{Colors.FG_CYAN}Metadata state has been reset.{Colors.RESET}")
 
     def check_and_refresh_metadata(self):
-        files = [Config.LOCAL_REPOMD_FILE,
-                 Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
-        missing = [f for f in files if not os.path.exists(f)]
+        """Verify presence of metadata files - download and decompress if missing."""
+        required_files = [Config.LOCAL_REPOMD_FILE,
+                          Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
+        missing = [f for f in required_files if not os.path.exists(f)]
+
         if missing:
             print(
-                f"{Colors.FG_YELLOW}Metadata files missing or removed: {', '.join(missing)}{Colors.RESET}")
-            print(f"{Colors.FG_CYAN}Refreshing metadata files now.{Colors.RESET}")
+                f"{Colors.FG_YELLOW}Missing metadata files: {', '.join(missing)}{Colors.RESET}")
+            print(f"{Colors.FG_CYAN}Refreshing metadata...{Colors.RESET}")
 
             downloader = Downloader(Config.DOWNLOADER)
-            downloader.download(Config.REPO_BASE_URL +
-                                Config.REPOMD_XML, Config.LOCAL_REPOMD_FILE)
+            repomd_url = urljoin(Config.REPO_BASE_URL, Config.REPOMD_XML)
+            downloader.download(repomd_url, Config.LOCAL_REPOMD_FILE)
+
             repomd_root = parse_xml(Config.LOCAL_REPOMD_FILE)
             if repomd_root is None:
                 raise RuntimeError(
-                    "Failed to parse repomd.xml metadata file, cannot continue.")
+                    "Failed to parse repomd.xml, cannot continue.")
+
             primary_url = get_primary_location_url(
                 repomd_root, Config.REPO_BASE_URL)
             if not primary_url:
                 raise RuntimeError(
-                    "Could not find primary metadata URL in repomd.xml")
+                    "Primary metadata URL not found in repomd.xml")
+
             downloader.download(primary_url, Config.LOCAL_XZ_FILE)
             decompress_file(Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE)
         else:
             print(
                 f"{Colors.FG_GREEN}All metadata files present, skipping refresh.{Colors.RESET}")
+
         self.reset()
 
     def cleanup_files(self):
+        """Remove all metadata files and reset."""
         files = [Config.LOCAL_REPOMD_FILE,
                  Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
         deleted_any = False
@@ -212,12 +235,13 @@ class MetadataHandler:
         self.reset()
 
     def build_maps(self, root):
+        """Build provides, requires, and dependency maps from parsed XML metadata."""
         ns = {"common": "http://linux.duke.edu/metadata/common",
               "rpm": "http://linux.duke.edu/metadata/rpm"}
         provides = defaultdict(set)
         requires = {}
 
-        packages_with_format = []
+        pkgs_with_format = []
         for pkg in root.findall("common:package", ns):
             name_elem = pkg.find("common:name", ns)
             if name_elem is None:
@@ -233,9 +257,9 @@ class MetadataHandler:
                     pname = entry.get("name")
                     if pname:
                         provides[pname].add(pkg_name)
-            packages_with_format.append((pkg_name, fmt))
+            pkgs_with_format.append((pkg_name, fmt))
 
-        for pkg_name, fmt in packages_with_format:
+        for pkg_name, fmt in pkgs_with_format:
             req = fmt.find("rpm:requires", ns)
             req_set = {entry.get("name") for entry in req.findall(
                 "rpm:entry", ns)} if req is not None else set()
@@ -254,14 +278,15 @@ class MetadataHandler:
         return requires, provides, dep_map
 
     def filter_packages(self, input_str):
-        parts = [p.strip() for p in input_str.split(',')]
-        pattern = fnmatch.fnmatch
+        """Filter stored packages based on comma-separated wildcards."""
+        patterns = [p.strip() for p in input_str.split(',')]
         filtered = {
-            pkg for pkg in self.all_packages for part in parts if pattern(pkg, part)}
+            pkg for pkg in self.all_packages for pat in patterns if fnmatch.fnmatch(pkg, pat)}
         return sorted(filtered)
 
 
 def decompress_file(input_path, output_path):
+    """Automatically detect compression type and decompress the file."""
     print(f"{Colors.FG_CYAN}Decompressing {input_path} to {output_path}...{Colors.RESET}")
     try:
         file_type = magic.from_file(input_path)
@@ -284,16 +309,17 @@ def decompress_file(input_path, output_path):
 
 
 def parse_xml(file_path):
+    """Parse XML file and return root or None on failure."""
     print(f"{Colors.FG_CYAN}Parsing {file_path}...{Colors.RESET}")
     try:
         return ET.parse(file_path).getroot()
     except ET.ParseError as e:
-        print(
-            f"{Colors.FG_RED}Failed to parse XML file '{file_path}': {e}{Colors.RESET}")
+        print(f"{Colors.FG_RED}Failed to parse XML '{file_path}': {e}{Colors.RESET}")
         return None
 
 
 def get_primary_location_url(root, base_url):
+    """Extract primary metadata location URL from repomd.xml root element."""
     ns = {"repo": "http://linux.duke.edu/metadata/repo"}
     for data in root.findall("repo:data", ns):
         if data.attrib.get("type") == "primary":
@@ -301,34 +327,37 @@ def get_primary_location_url(root, base_url):
             if location is not None:
                 href = location.attrib.get("href")
                 if href:
-                    return href if href.startswith("http") else base_url + href
+                    return href if href.startswith("http") else urljoin(base_url, href)
     return None
 
 
 def get_all_packages(root):
     ns = {"common": "http://linux.duke.edu/metadata/common"}
-    return sorted(
-        name.text for name in
-        (pkg.find("common:name", ns)
-         for pkg in root.findall("common:package", ns))
-        if name is not None
-    )
+    return sorted(name.text for name in (pkg.find("common:name", ns) for pkg in root.findall("common:package", ns)) if name is not None)
 
 
 def get_package_rpm_urls(root, base_url, package_names):
+    """
+    Retrieve RPM URLs for the given package names.
+    Returns a list of tuples (package_name, rpm_url).
+    """
     ns = {"common": "http://linux.duke.edu/metadata/common"}
     packages_by_name = defaultdict(list)
+
     for pkg in root.findall("common:package", ns):
         name_elem = pkg.find("common:name", ns)
         if name_elem is None or name_elem.text not in package_names:
             continue
+
         version = pkg.find("common:version", ns)
         location = pkg.find("common:location", ns)
         if version is None or location is None:
             continue
+
         href = location.attrib.get("href")
         if not href:
             continue
+
         packages_by_name[name_elem.text].append({
             "ver": version.attrib.get("ver"),
             "rel": version.attrib.get("rel"),
@@ -353,6 +382,7 @@ def get_package_rpm_urls(root, base_url, package_names):
 
 
 def print_packages_tabular(packages, columns=None, column_width=None):
+    """Print package names in a tabular format."""
     if not packages:
         print(f"{Colors.FG_RED}No packages found.{Colors.RESET}")
         return
@@ -367,6 +397,7 @@ def print_packages_tabular(packages, columns=None, column_width=None):
 
 
 def resolve_all_dependencies(pkg_name, dep_map):
+    """Resolve all recursive dependencies of a package."""
     if pkg_name not in dep_map:
         return None
     to_install = set()
@@ -382,12 +413,15 @@ def resolve_all_dependencies(pkg_name, dep_map):
 
 
 def edit_configuration():
-    keys = sorted(k for k in dir(Config) if k.isupper())
-    key_map = {str(i + 1): k for i, k in enumerate(keys)}
+    """Provides an interactive menu for editing configuration variables."""
+    config_keys = sorted(k for k in dir(Config) if k.isupper())
+    key_map = {str(i + 1): k for i, k in enumerate(config_keys)}
+
     while True:
         Config.print_config()
-        print(f"{Colors.FG_YELLOW}Select the config key to change by number (or press Enter to return):{Colors.RESET}")
-        for i, key in enumerate(keys, 1):
+        print(
+            f"{Colors.FG_YELLOW}Select config key by number (or Enter to return):{Colors.RESET}")
+        for i, key in enumerate(config_keys, 1):
             print(f"  {Colors.FG_CYAN}{i}{Colors.RESET}) {key}")
         choice = input(
             f"{Colors.FG_CYAN}Choice (number): {Colors.RESET}").strip()
@@ -395,51 +429,56 @@ def edit_configuration():
             break
         if choice not in key_map:
             print(
-                f"{Colors.FG_RED}Invalid choice '{choice}', enter a valid number.{Colors.RESET}")
+                f"{Colors.FG_RED}Invalid choice '{choice}', try again.{Colors.RESET}")
             continue
         key = key_map[choice]
         current = getattr(Config, key)
         new_value = input(
             f"{Colors.FG_CYAN}Enter new value for {key} (current: {current}): {Colors.RESET}").strip()
-        if isinstance(current, bool):
-            if new_value.lower() in {"true", "1", "yes", "y"}:
-                new_value = True
-            elif new_value.lower() in {"false", "0", "no", "n"}:
-                new_value = False
-            else:
-                print(
-                    f"{Colors.FG_RED}Please enter a valid boolean (true/false).{Colors.RESET}")
-                continue
-        elif isinstance(current, int):
-            if not new_value.isdigit():
-                print(f"{Colors.FG_RED}Please enter a valid integer.{Colors.RESET}")
-                continue
-            new_value = int(new_value)
+
+        try:
+            if isinstance(current, bool):
+                if new_value.lower() in {"true", "1", "yes", "y"}:
+                    new_value = True
+                elif new_value.lower() in {"false", "0", "no", "n"}:
+                    new_value = False
+                else:
+                    print(
+                        f"{Colors.FG_RED}Please enter a valid boolean (true/false).{Colors.RESET}")
+                    continue
+            elif isinstance(current, int):
+                new_value = int(new_value)
+        except ValueError:
+            print(f"{Colors.FG_RED}Invalid input type for {key}.{Colors.RESET}")
+            continue
+
         if not Config.set_config(key, new_value):
             print(f"{Colors.FG_RED}Failed to update config.{Colors.RESET}")
 
 
-def resolve_package_list_with_prompt(mh):
+def get_package_selection(metadata_handler):
+    """Prompt user for package filters and optional dependency expansion."""
     filters = input(
         f"{Colors.FG_CYAN}Enter package names or wildcards (comma-separated): {Colors.RESET}").strip()
     packages = []
     for f in filters.split(','):
-        packages.extend(mh.filter_packages(f.strip()))
+        packages.extend(metadata_handler.filter_packages(f.strip()))
     if not packages:
         print(f"{Colors.FG_RED}No packages matched the filter.{Colors.RESET}")
         return []
     include_deps = input(
-        f"{Colors.FG_CYAN}Include dependencies as well? (y/N): {Colors.RESET}").strip().lower() in ['y', 'yes', '1', 'true']
+        f"{Colors.FG_CYAN}Include dependencies? (y/N): {Colors.RESET}").strip().lower() in ['y', 'yes', '1', 'true']
     all_packages = set(packages)
     if include_deps:
         for pkg in packages:
-            deps = resolve_all_dependencies(pkg, mh.dep_map)
+            deps = resolve_all_dependencies(pkg, metadata_handler.dep_map)
             if deps:
                 all_packages.update(deps)
     return sorted(all_packages)
 
 
 def download_packages(package_names, dep_map, primary_root, download_deps=False):
+    """Download selected packages, optionally including dependencies."""
     os.makedirs(Config.DOWNLOAD_DIR, exist_ok=True)
     to_download = set(package_names)
     if download_deps:
@@ -449,108 +488,115 @@ def download_packages(package_names, dep_map, primary_root, download_deps=False)
                 to_download.update(deps)
 
     tqdm.write(
-        f"{Colors.FG_CYAN}Downloading the following packages: {', '.join(to_download)}{Colors.RESET}")
+        f"{Colors.FG_CYAN}Downloading packages: {', '.join(sorted(to_download))}{Colors.RESET}")
 
-    all_urls = []
+    rpm_urls = []
     for pkg in to_download:
-        rpm_urls = get_package_rpm_urls(
-            primary_root, Config.REPO_BASE_URL, [pkg])
-        if not rpm_urls:
+        urls = get_package_rpm_urls(primary_root, Config.REPO_BASE_URL, [pkg])
+        if not urls:
             tqdm.write(
                 f"{Colors.FG_RED}No RPM URLs found for {pkg}{Colors.RESET}")
             continue
-        all_urls.extend(rpm_urls)
+        rpm_urls.extend(urls)
 
     downloader = Downloader(Config.DOWNLOADER)
-
-    with tqdm(total=len(all_urls), desc="Downloading packages", unit="pkg") as pbar:
-        for _, url in all_urls:
-            dest = os.path.join(Config.DOWNLOAD_DIR, os.path.basename(url))
-            if os.path.exists(dest):
+    with tqdm(total=len(rpm_urls), desc="Downloading packages", unit="pkg") as progress_bar:
+        for _, url in rpm_urls:
+            dest_file = os.path.join(
+                Config.DOWNLOAD_DIR, os.path.basename(url))
+            if os.path.exists(dest_file):
                 tqdm.write(
                     f"{Colors.FG_YELLOW}Already downloaded: {os.path.basename(url)}{Colors.RESET}")
-                pbar.update(1)
+                progress_bar.update(1)
                 continue
             try:
-                downloader.download(url, dest)
+                downloader.download(url, dest_file)
                 tqdm.write(
                     f"{Colors.FG_GREEN}Downloaded: {os.path.basename(url)}{Colors.RESET}")
             except Exception as e:
                 tqdm.write(
                     f"{Colors.FG_RED}Failed to download {os.path.basename(url)}: {e}{Colors.RESET}")
-            pbar.update(1)
+            progress_bar.update(1)
 
 
-def list_packages(mh, _):
+def list_packages(metadata_handler, _):
     filters = input(
         f"{Colors.FG_CYAN}Enter filter string(s) with wildcards (comma-separated): {Colors.RESET}").strip()
     filtered = []
     for f in filters.split(','):
-        filtered.extend(mh.filter_packages(f.strip()))
+        filtered.extend(metadata_handler.filter_packages(f.strip()))
     print_packages_tabular(sorted(set(filtered)))
 
 
-def calculate_dependencies(mh, _):
+def calculate_dependencies(metadata_handler, _):
     pkg = input(f"{Colors.FG_CYAN}Enter package name: {Colors.RESET}").strip()
-    if pkg not in mh.dep_map:
+    if pkg not in metadata_handler.dep_map:
         print(f"{Colors.FG_RED}Package '{pkg}' not found.{Colors.RESET}")
         return
-    resolved = resolve_all_dependencies(pkg, mh.dep_map)
+    resolved = resolve_all_dependencies(pkg, metadata_handler.dep_map)
     if not resolved:
         print(f"{Colors.FG_RED}Could not resolve dependencies for {pkg}{Colors.RESET}")
         return
-    print(f"{Colors.FG_GREEN}Dependencies for {pkg} (including package itself):{Colors.RESET}")
+    print(f"{Colors.FG_GREEN}Dependencies for {pkg} (including itself):{Colors.RESET}")
     print_packages_tabular(sorted(resolved))
 
 
-def refresh_metadata(mh, _):
-    mh.check_and_refresh_metadata()
+def refresh_metadata(metadata_handler, _):
+    metadata_handler.check_and_refresh_metadata()
     primary_root = parse_xml(Config.LOCAL_XML_FILE)
-    mh.all_packages = get_all_packages(primary_root)
-    mh.requires_map, mh.provides_map, mh.dep_map = mh.build_maps(primary_root)
+    if primary_root is None:
+        print(f"{Colors.FG_RED}Failed to parse primary metadata XML.{Colors.RESET}")
+        return
+    metadata_handler.all_packages = get_all_packages(primary_root)
+    metadata_handler.requires_map, metadata_handler.provides_map, metadata_handler.dep_map = metadata_handler.build_maps(
+        primary_root)
 
 
-def cleanup_metadata(mh, _):
-    mh.cleanup_files()
+def cleanup_metadata(metadata_handler, _):
+    metadata_handler.cleanup_files()
 
 
-def list_rpm_urls(mh, primary_root):
-    all_packages = resolve_package_list_with_prompt(mh)
-    if not all_packages:
+def list_rpm_urls(metadata_handler, primary_root):
+    selected_packages = get_package_selection(metadata_handler)
+    if not selected_packages:
         return
     rpm_urls = get_package_rpm_urls(
-        primary_root, Config.REPO_BASE_URL, all_packages)
+        primary_root, Config.REPO_BASE_URL, selected_packages)
     if not rpm_urls:
-        print(
-            f"{Colors.FG_RED}No RPM URLs found for the selected packages.{Colors.RESET}")
+        print(f"{Colors.FG_RED}No RPM URLs found for selected packages.{Colors.RESET}")
         return
     for pkg, url in rpm_urls:
         print(f"{Colors.FG_MAGENTA}{pkg:<30}{Colors.FG_CYAN}{url}{Colors.RESET}")
 
 
-def download_packages_ui(mh, primary_root):
-    all_packages = resolve_package_list_with_prompt(mh)
-    if not all_packages:
+def download_packages_ui(metadata_handler, primary_root):
+    selected_packages = get_package_selection(metadata_handler)
+    if not selected_packages:
         return
-    download_packages(all_packages, mh.dep_map,
+    download_packages(selected_packages, metadata_handler.dep_map,
                       primary_root, download_deps=False)
 
 
-def configure_settings(mh=None, primary_root=None):
+def configure_settings(*_):
     edit_configuration()
 
 
-def exit_program(mh=None, primary_root=None):
+def exit_program(*_):
     print(f"{Colors.FG_GREEN}Goodbye!{Colors.RESET}")
     exit(0)
 
 
 def main():
-    mh = MetadataHandler()
-    mh.check_and_refresh_metadata()
+    metadata_handler = MetadataHandler()
+    metadata_handler.check_and_refresh_metadata()
     primary_root = parse_xml(Config.LOCAL_XML_FILE)
-    mh.all_packages = get_all_packages(primary_root)
-    mh.requires_map, mh.provides_map, mh.dep_map = mh.build_maps(primary_root)
+    if primary_root is None:
+        print(
+            f"{Colors.FG_RED}Failed to parse primary metadata XML file, exiting.{Colors.RESET}")
+        return
+    metadata_handler.all_packages = get_all_packages(primary_root)
+    metadata_handler.requires_map, metadata_handler.provides_map, metadata_handler.dep_map = metadata_handler.build_maps(
+        primary_root)
 
     menu_options = {
         "1": list_packages,
@@ -579,7 +625,10 @@ def main():
             f"{Colors.FG_CYAN}Enter your choice: {Colors.RESET}").strip()
         action = menu_options.get(choice)
         if action:
-            action(mh, primary_root)
+            try:
+                action(metadata_handler, primary_root)
+            except Exception as e:
+                print(f"{Colors.FG_RED}Error during operation: {e}{Colors.RESET}")
         else:
             print(f"{Colors.FG_RED}Invalid choice, please try again.{Colors.RESET}")
 
