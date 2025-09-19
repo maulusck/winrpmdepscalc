@@ -180,6 +180,9 @@ class MetadataHandler:
             downloader.download(Config.REPO_BASE_URL +
                                 Config.REPOMD_XML, Config.LOCAL_REPOMD_FILE)
             repomd_root = parse_xml(Config.LOCAL_REPOMD_FILE)
+            if repomd_root is None:
+                raise RuntimeError(
+                    "Failed to parse repomd.xml metadata file, cannot continue.")
             primary_url = get_primary_location_url(
                 repomd_root, Config.REPO_BASE_URL)
             if not primary_url:
@@ -282,7 +285,12 @@ def decompress_file(input_path, output_path):
 
 def parse_xml(file_path):
     print(f"{Colors.FG_CYAN}Parsing {file_path}...{Colors.RESET}")
-    return ET.parse(file_path).getroot()
+    try:
+        return ET.parse(file_path).getroot()
+    except ET.ParseError as e:
+        print(
+            f"{Colors.FG_RED}Failed to parse XML file '{file_path}': {e}{Colors.RESET}")
+        return None
 
 
 def get_primary_location_url(root, base_url):
