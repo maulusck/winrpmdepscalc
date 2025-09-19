@@ -118,15 +118,17 @@ class MetadataManager:
         self.requires_map = {}
         self.provides_map = defaultdict(set)
         self.dep_map = {}
+        self.primary_root = None
+        self.metadata_loaded = False
 
-    def check_and_refresh_metadata(self):
+    def check_and_refresh_metadata(self, force_refresh=False):
         required_files = [self.config.LOCAL_REPOMD_FILE,
                           self.config.LOCAL_XZ_FILE, self.config.LOCAL_XML_FILE]
         missing = [f for f in required_files if not os.path.exists(f)]
 
-        if missing:
+        if missing or force_refresh:
             print(
-                f"{Colors.FG_YELLOW}Missing metadata files: {', '.join(missing)}{Colors.RESET}")
+                f"{Colors.FG_YELLOW}Missing or refresh forced for metadata files: {', '.join(missing)}{Colors.RESET}")
             print(f"{Colors.FG_CYAN}Refreshing metadata...{Colors.RESET}")
 
             repomd_url = urljoin(self.config.REPO_BASE_URL,
@@ -144,12 +146,20 @@ class MetadataManager:
             self.downloader.download(primary_url, self.config.LOCAL_XZ_FILE)
             self._decompress_file(self.config.LOCAL_XZ_FILE,
                                   self.config.LOCAL_XML_FILE)
+            self._reset_metadata_state()
+            self._load_metadata_maps()
+            self.metadata_loaded = True
+            self.primary_root = self._parse_xml(self.config.LOCAL_XML_FILE)
         else:
             print(
                 f"{Colors.FG_GREEN}All metadata files present, skipping refresh.{Colors.RESET}")
-
-        self._reset_metadata_state()
-        self._load_metadata_maps()
+            if not self.metadata_loaded:
+                self.primary_root = self._parse_xml(self.config.LOCAL_XML_FILE)
+                if self.primary_root is None:
+                    raise RuntimeError(
+                        "Failed to parse primary XML metadata on startup")
+                self._load_metadata_maps()
+                self.metadata_loaded = True
 
     def cleanup_files(self):
         files = [self.config.LOCAL_REPOMD_FILE,
@@ -166,6 +176,8 @@ class MetadataManager:
         if not deleted_any:
             print(f"{Colors.FG_YELLOW}No metadata files to remove.{Colors.RESET}")
         self._reset_metadata_state()
+        self.primary_root = None
+        self.metadata_loaded = False
 
     def _reset_metadata_state(self):
         self.all_packages.clear()
@@ -214,22 +226,24 @@ class MetadataManager:
             raise
 
     def _load_metadata_maps(self):
-        root = self._parse_xml(self.config.LOCAL_XML_FILE)
-        if root is None:
+        if self.primary_root is None:
+            self.primary_root = self._parse_xml(self.config.LOCAL_XML_FILE)
+        if self.primary_root is None:
             raise RuntimeError("Failed to load primary XML metadata")
 
         ns = {"common": "http://linux.duke.edu/metadata/common",
               "rpm": "http://linux.duke.edu/metadata/rpm"}
 
         self.all_packages = sorted(
-            pkg.find("common:name", ns).text for pkg in root.findall("common:package", ns) if pkg.find("common:name", ns) is not None
+            pkg.find("common:name", ns).text for pkg in self.primary_root.findall("common:package", ns)
+            if pkg.find("common:name", ns) is not None
         )
 
         self.requires_map.clear()
         self.provides_map.clear()
         pkgs_with_format = []
 
-        for pkg in root.findall("common:package", ns):
+        for pkg in self.primary_root.findall("common:package", ns):
             name_elem = pkg.find("common:name", ns)
             if name_elem is None:
                 continue
@@ -356,7 +370,7 @@ def download_packages(package_names, dep_map, primary_root, config: Config, down
     rpm_urls = []
     for pkg in packages_to_download:
         urls = get_package_rpm_urls(primary_root, config.REPO_BASE_URL, [
-                                    pkg], only_latest=config.ONLY_LATEST_VERSION)
+            pkg], only_latest=config.ONLY_LATEST_VERSION)
         if not urls:
             tqdm.write(
                 f"{Colors.FG_RED}No RPM URLs found for {pkg}{Colors.RESET}")
@@ -503,6 +517,7 @@ def prompt_package_selection(metadata: MetadataManager):
 
 
 def list_packages(metadata: MetadataManager, *_):
+
     patterns = input(
         f"{Colors.FG_CYAN}Enter wildcard filters (comma-separated): {Colors.RESET}").strip().split(",")
     packages = metadata.filter_packages(patterns)
@@ -525,7 +540,7 @@ def calc_dependencies(metadata: MetadataManager, *_):
 
 
 def refresh_metadata(metadata: MetadataManager, *_):
-    metadata.check_and_refresh_metadata()
+    metadata.check_and_refresh_metadata(force_refresh=True)
 
 
 def cleanup_metadata(metadata: MetadataManager, *_):
@@ -534,10 +549,11 @@ def cleanup_metadata(metadata: MetadataManager, *_):
 
 def list_rpm_urls(metadata: MetadataManager, primary_root=None):
     if primary_root is None:
-        primary_root = metadata._parse_xml(metadata.config.LOCAL_XML_FILE)
+
+        primary_root = metadata.primary_root
         if primary_root is None:
             print(
-                f"{Colors.FG_RED}Failed to parse primary metadata XML.{Colors.RESET}")
+                f"{Colors.FG_RED}Primary metadata XML not loaded. Refresh metadata first.{Colors.RESET}")
             return
 
     selected = prompt_package_selection(metadata)
@@ -558,10 +574,10 @@ def list_rpm_urls(metadata: MetadataManager, primary_root=None):
 
 def download_packages_ui(metadata: MetadataManager, primary_root=None):
     if primary_root is None:
-        primary_root = metadata._parse_xml(metadata.config.LOCAL_XML_FILE)
+        primary_root = metadata.primary_root
         if primary_root is None:
             print(
-                f"{Colors.FG_RED}Failed to parse primary metadata XML.{Colors.RESET}")
+                f"{Colors.FG_RED}Primary metadata XML not loaded. Refresh metadata first.{Colors.RESET}")
             return
 
     selected = prompt_package_selection(metadata)
@@ -573,7 +589,6 @@ def download_packages_ui(metadata: MetadataManager, primary_root=None):
 
 
 def configure_settings(metadata: MetadataManager, _, config_path=None):
-
     edit_configuration(metadata.config, config_path)
 
 
@@ -595,6 +610,7 @@ MENU_ACTIONS = {
 
 
 def run_interactive_menu(metadata: MetadataManager, config_path):
+
     while True:
         print(f"\n{Colors.BOLD}{Colors.FG_BLUE}--- MENU ---{Colors.RESET}")
         print(f"{Colors.FG_YELLOW}1) List packages{Colors.RESET}")
@@ -610,7 +626,9 @@ def run_interactive_menu(metadata: MetadataManager, config_path):
         if action:
             try:
 
-                if action == configure_settings:
+                if action == refresh_metadata:
+                    action(metadata)
+                elif action == configure_settings:
                     action(metadata, None, config_path)
                 elif action in (list_rpm_urls, download_packages_ui):
                     action(metadata)
@@ -661,11 +679,25 @@ def main():
         downloader = Downloader(config.DOWNLOADER)
         metadata = MetadataManager(config, downloader)
 
-        metadata.check_and_refresh_metadata()
+        cli_actions_need_meta = any([
+            args.list_packages,
+            args.calc_deps,
+            args.refresh_meta,
+            args.list_rpm_urls,
+            args.download,
+        ])
+        if cli_actions_need_meta:
+            metadata.check_and_refresh_metadata()
+        else:
 
-        primary_root = metadata._parse_xml(metadata.config.LOCAL_XML_FILE)
+            pass
+
+        primary_root = None
+        if cli_actions_need_meta:
+            primary_root = metadata.primary_root
 
         if args.list_packages:
+
             list_packages(metadata)
         elif args.calc_deps:
             if args.calc_deps in metadata.dep_map:
@@ -677,6 +709,7 @@ def main():
             refresh_metadata(metadata)
         elif args.cleanup_meta:
             cleanup_metadata(metadata)
+
         if args.list_rpm_urls:
             list_rpm_urls(metadata, primary_root)
         elif args.download:
@@ -684,6 +717,9 @@ def main():
         elif args.configure:
             configure_settings(metadata, None, args.config)
         elif not args.no_interactive:
+
+            if not metadata.metadata_loaded:
+                metadata.check_and_refresh_metadata()
             run_interactive_menu(metadata, args.config)
         else:
             print(
