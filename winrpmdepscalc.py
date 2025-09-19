@@ -565,7 +565,7 @@ def edit_configuration(config: Config, config_path: Optional[Path] = None) -> No
             print(f"{LogColors.YELLOW}Changes not saved.{LogColors.RESET}")
 
 
-def prompt_package_selection(metadata: MetadataManager) -> List[str]:
+def prompt_package_selection(metadata: MetadataManager, ask_include_deps: bool = True) -> List[str]:
     filters = input(
         f"{LogColors.CYAN}Enter package names/wildcards (comma-separated): {LogColors.RESET}").strip()
     patterns = [p.strip() for p in filters.split(',') if p.strip()]
@@ -573,15 +573,17 @@ def prompt_package_selection(metadata: MetadataManager) -> List[str]:
     if not selected:
         _logger.error("No packages matched.")
         return []
-    include_deps = input(
-        f"{LogColors.CYAN}Include dependencies? (y/N): {LogColors.RESET}").strip().lower() in {'y', 'yes', '1', 'true'}
-    all_pkgs = set(selected)
-    if include_deps:
-        for pkg in selected:
-            deps = metadata.resolve_all_dependencies(pkg)
-            if deps:
-                all_pkgs.update(deps)
-    return sorted(all_pkgs)
+    if ask_include_deps:
+        include_deps = input(
+            f"{LogColors.CYAN}Include dependencies? (y/N): {LogColors.RESET}").strip().lower() in {'y', 'yes', '1', 'true'}
+        if include_deps:
+            all_pkgs = set(selected)
+            for pkg in selected:
+                deps = metadata.resolve_all_dependencies(pkg)
+                if deps:
+                    all_pkgs.update(deps)
+            return sorted(all_pkgs)
+    return sorted(selected)
 
 
 def list_packages(metadata: MetadataManager, package_patterns: Optional[List[str]] = None) -> None:
@@ -596,7 +598,7 @@ def list_packages(metadata: MetadataManager, package_patterns: Optional[List[str
 
 
 def calc_dependencies(metadata: MetadataManager) -> None:
-    selected = prompt_package_selection(metadata)
+    selected = prompt_package_selection(metadata, ask_include_deps=False)
     if not selected:
         return
     for package_name in selected:
