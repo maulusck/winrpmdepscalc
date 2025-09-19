@@ -14,6 +14,7 @@ from tqdm import tqdm
 import requests
 import urllib3
 from requests_negotiate_sspi import HttpNegotiateAuth
+from enum import Enum
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -29,6 +30,84 @@ class Colors:
     FG_CYAN = "\033[36m"
 
 
+class DownloaderType(Enum):
+    POWERSHELL = "powershell"
+    PYTHON = "python"
+
+    @classmethod
+    def has_value(cls, value):
+        return value.lower() in (item.value for item in cls)
+
+
+class Downloader:
+    allowed_downloaders = [DownloaderType.POWERSHELL, DownloaderType.PYTHON]
+
+    def __init__(self, downloader_type="powershell"):
+        d = downloader_type.lower()
+        if not DownloaderType.has_value(d):
+            valid = ', '.join([dt.value for dt in self.allowed_downloaders])
+            raise ValueError(
+                f"Invalid downloader '{downloader_type}'. Valid options are: {valid}"
+            )
+        self.downloader_type = DownloaderType(d)
+
+    def download(self, url, output_file, proxy_url=None):
+        if self.downloader_type == DownloaderType.POWERSHELL:
+            self._download_powershell(url, output_file)
+        elif self.downloader_type == DownloaderType.PYTHON:
+            self._download_python(url, output_file, proxy_url)
+        else:
+            raise RuntimeError(
+                f"Unsupported downloader {self.downloader_type}")
+
+    def _download_powershell(self, url, output_file):
+        ps_script = f"""
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
+
+        $progress = [System.Management.Automation.ProgressRecord]::new(1, "Downloading", "{url}")
+        $wc.DownloadProgressChanged += {{
+            param($sender, $e)
+            $progress.PercentComplete = $e.ProgressPercentage
+            Write-Progress -ProgressRecord $progress
+        }}
+        $wc.DownloadFileAsync('{url}', '{output_file}')
+        while ($wc.IsBusy) {{
+            Start-Sleep -Milliseconds 100
+        }}
+        """
+        tqdm.write(
+            f"{Colors.FG_CYAN}Downloading {url} to {output_file} with PowerShell...{Colors.RESET}")
+        cmd = ["powershell", "-NoProfile", "-Command", ps_script]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            tqdm.write(
+                f"{Colors.FG_RED}PowerShell error output:\n{result.stderr}{Colors.RESET}")
+            raise RuntimeError(f"Failed to download {url}")
+
+    def _download_python(self, url, output_file, proxy_url=None):
+        proxies = {"https": proxy_url} if proxy_url else {}
+        if not proxy_url:
+            system_proxies = urllib.request.getproxies()
+            https_proxy = system_proxies.get("https")
+            if https_proxy:
+                proxies["https"] = https_proxy
+
+        session = requests.Session()
+        session.auth = HttpNegotiateAuth()
+
+        tqdm.write(
+            f"{Colors.FG_CYAN}Using HTTPS proxy: {proxies.get('https', 'None')}{Colors.RESET}")
+        with session.get(url, stream=True, proxies=proxies or None, verify=False) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("content-length", 0))
+            with open(output_file, "wb") as f, tqdm(total=total, unit="iB", unit_scale=True, desc=f"Downloading {url}") as bar:
+                for chunk in r.iter_content(1024):
+                    if chunk:
+                        f.write(chunk)
+                        bar.update(len(chunk))
+
+
 class Config:
     REPO_BASE_URL = "https://dl.fedoraproject.org/pub/epel/9/Everything/x86_64/"
     REPOMD_XML = "repodata/repomd.xml"
@@ -40,6 +119,8 @@ class Config:
     DOWNLOAD_DIR = "rpms"
     SUPPORT_WEAK_DEPS = False
     ONLY_LATEST_VERSION = True
+
+    DOWNLOADER = "powershell"
 
     @classmethod
     def print_config(cls):
@@ -53,12 +134,23 @@ class Config:
 
     @classmethod
     def set_config(cls, key, value):
-        if hasattr(cls, key):
+        if not hasattr(cls, key):
+            print(f"{Colors.FG_RED}Config key '{key}' not found.{Colors.RESET}")
+            return False
+        if key == "DOWNLOADER":
+
+            lowers = [dt.value for dt in Downloader.allowed_downloaders]
+            if value.lower() not in lowers:
+                print(
+                    f"{Colors.FG_RED}Invalid value for DOWNLOADER. Allowed values: {', '.join(lowers)}{Colors.RESET}")
+                return False
+            setattr(cls, key, value.lower())
+            print(f"{Colors.FG_GREEN}Updated {key} to: {value.lower()}{Colors.RESET}")
+            return True
+        else:
             setattr(cls, key, value)
             print(f"{Colors.FG_GREEN}Updated {key} to: {value}{Colors.RESET}")
             return True
-        print(f"{Colors.FG_RED}Config key '{key}' not found.{Colors.RESET}")
-        return False
 
 
 class MetadataHandler:
@@ -83,15 +175,17 @@ class MetadataHandler:
             print(
                 f"{Colors.FG_YELLOW}Metadata files missing or removed: {', '.join(missing)}{Colors.RESET}")
             print(f"{Colors.FG_CYAN}Refreshing metadata files now.{Colors.RESET}")
-            download_file_powershell(
-                Config.REPO_BASE_URL + Config.REPOMD_XML, Config.LOCAL_REPOMD_FILE)
+
+            downloader = Downloader(Config.DOWNLOADER)
+            downloader.download(Config.REPO_BASE_URL +
+                                Config.REPOMD_XML, Config.LOCAL_REPOMD_FILE)
             repomd_root = parse_xml(Config.LOCAL_REPOMD_FILE)
             primary_url = get_primary_location_url(
                 repomd_root, Config.REPO_BASE_URL)
             if not primary_url:
                 raise RuntimeError(
                     "Could not find primary metadata URL in repomd.xml")
-            download_file_powershell(primary_url, Config.LOCAL_XZ_FILE)
+            downloader.download(primary_url, Config.LOCAL_XZ_FILE)
             decompress_file(Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE)
         else:
             print(
@@ -162,43 +256,6 @@ class MetadataHandler:
         filtered = {
             pkg for pkg in self.all_packages for part in parts if pattern(pkg, part)}
         return sorted(filtered)
-
-
-def download_file_powershell(url, output_file):
-    ps_script = f"""
-    $wc = New-Object System.Net.WebClient
-    $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
-    $wc.DownloadFile('{url}', '{output_file}')
-    """
-    cmd = ["powershell", "-NoProfile", "-Command", ps_script]
-    tqdm.write(
-        f"{Colors.FG_CYAN}Downloading {url} to {output_file} ...{Colors.RESET}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        tqdm.write(
-            f"{Colors.FG_RED}PowerShell error output:\n{result.stderr}{Colors.RESET}")
-        raise RuntimeError(f"Failed to download {url}")
-
-
-def download_file_python(url, output_file, proxy_url=None):
-    proxies = {"https": proxy_url} if proxy_url else {}
-    if not proxy_url:
-        system_proxies = urllib.request.getproxies()
-        https_proxy = system_proxies.get("https")
-        if https_proxy:
-            proxies["https"] = https_proxy
-
-    session = requests.Session()
-    session.auth = HttpNegotiateAuth()
-
-    tqdm.write(f"Using HTTPS proxy: {proxies.get('https', 'None')}")
-    with session.get(url, stream=True, proxies=proxies or None, verify=False) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        with open(output_file, "wb") as f, tqdm(total=total, unit="iB", unit_scale=True, desc=f"Downloading {url}") as bar:
-            for chunk in r.iter_content(1024):
-                f.write(chunk)
-                bar.update(len(chunk))
 
 
 def decompress_file(input_path, output_path):
@@ -318,7 +375,7 @@ def resolve_all_dependencies(pkg_name, dep_map):
 
 def edit_configuration():
     keys = sorted(k for k in dir(Config) if k.isupper())
-    key_map = {str(i+1): k for i, k in enumerate(keys)}
+    key_map = {str(i + 1): k for i, k in enumerate(keys)}
     while True:
         Config.print_config()
         print(f"{Colors.FG_YELLOW}Select the config key to change by number (or press Enter to return):{Colors.RESET}")
@@ -350,7 +407,8 @@ def edit_configuration():
                 print(f"{Colors.FG_RED}Please enter a valid integer.{Colors.RESET}")
                 continue
             new_value = int(new_value)
-        Config.set_config(key, new_value)
+        if not Config.set_config(key, new_value):
+            print(f"{Colors.FG_RED}Failed to update config.{Colors.RESET}")
 
 
 def resolve_package_list_with_prompt(mh):
@@ -395,6 +453,8 @@ def download_packages(package_names, dep_map, primary_root, download_deps=False)
             continue
         all_urls.extend(rpm_urls)
 
+    downloader = Downloader(Config.DOWNLOADER)
+
     with tqdm(total=len(all_urls), desc="Downloading packages", unit="pkg") as pbar:
         for _, url in all_urls:
             dest = os.path.join(Config.DOWNLOAD_DIR, os.path.basename(url))
@@ -404,7 +464,7 @@ def download_packages(package_names, dep_map, primary_root, download_deps=False)
                 pbar.update(1)
                 continue
             try:
-                download_file_python(url, dest)
+                downloader.download(url, dest)
                 tqdm.write(
                     f"{Colors.FG_GREEN}Downloaded: {os.path.basename(url)}{Colors.RESET}")
             except Exception as e:
