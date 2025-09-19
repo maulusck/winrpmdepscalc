@@ -43,6 +43,7 @@ class Config:
     PACKAGE_COLUMN_WIDTH = 30
     DOWNLOAD_DIR = "rpms"
     SUPPORT_WEAK_DEPS = False
+    ONLY_LATEST_VERSION = True
 
     @classmethod
     def print_config(cls):
@@ -290,22 +291,54 @@ def get_all_packages(root_element):
 
 def get_package_rpm_urls(root_element, base_url, package_names):
     ns = {"common": "http://linux.duke.edu/metadata/common"}
-    rpm_urls = []
+    packages_by_name = defaultdict(list)
 
     for package in root_element.findall("common:package", ns):
         name_elem = package.find("common:name", ns)
         if name_elem is None or name_elem.text not in package_names:
             continue
 
+        version_elem = package.find("common:version", ns)
         location_elem = package.find("common:location", ns)
-        if location_elem is None:
+        if version_elem is None or location_elem is None:
             continue
 
         href = location_elem.attrib.get("href")
-        if href:
+        if not href:
+            continue
 
-            full_url = urljoin(base_url, href)
-            rpm_urls.append((name_elem.text, full_url))
+        version_data = {
+            "ver": version_elem.attrib.get("ver"),
+            "rel": version_elem.attrib.get("rel"),
+            "epoch": int(version_elem.attrib.get("epoch", "0")),
+            "href": href,
+            "name": name_elem.text
+        }
+        packages_by_name[name_elem.text].append(version_data)
+
+    rpm_urls = []
+
+    for pkg_name in package_names:
+        if pkg_name not in packages_by_name:
+            continue
+
+        entries = packages_by_name[pkg_name]
+
+        if Config.ONLY_LATEST_VERSION:
+            def version_key(entry):
+                return (
+                    entry["epoch"],
+                    entry["ver"] or "",
+                    entry["rel"] or ""
+                )
+
+            latest = sorted(entries, key=version_key, reverse=True)[0]
+            full_url = urljoin(base_url, latest["href"])
+            rpm_urls.append((pkg_name, full_url))
+        else:
+            for entry in entries:
+                full_url = urljoin(base_url, entry["href"])
+                rpm_urls.append((pkg_name, full_url))
 
     return rpm_urls
 
