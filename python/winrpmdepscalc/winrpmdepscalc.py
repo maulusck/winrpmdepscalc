@@ -393,6 +393,30 @@ def download_packages(package_names, dep_map, primary_root, download_deps=False)
             pbar.update(1)
 
 
+def resolve_package_list_with_prompt(mh):
+    filters = input(
+        f"{Colors.FG_CYAN}Enter package names or wildcards (comma-separated): {Colors.RESET}").strip()
+    packages = []
+    for f in filters.split(','):
+        packages.extend(mh.filter_packages(f.strip()))
+
+    if not packages:
+        print(f"{Colors.FG_RED}No packages matched the filter.{Colors.RESET}")
+        return []
+
+    include_deps = input(
+        f"{Colors.FG_CYAN}Include dependencies as well? (y/N): {Colors.RESET}").strip().lower() in ['y', 'yes', '1', 'true']
+
+    all_packages = set(packages)
+    if include_deps:
+        for pkg in packages:
+            deps = resolve_all_dependencies(pkg, mh.dep_map)
+            if deps:
+                all_packages.update(deps)
+
+    return sorted(all_packages)
+
+
 def main():
     mh = MetadataHandler()
     mh.check_and_refresh_metadata()
@@ -467,27 +491,29 @@ def cleanup_metadata(mh, _):
 
 
 def list_rpm_urls(mh, primary_root):
-    filters = input(
-        f"{Colors.FG_CYAN}Enter filter string(s) with wildcards (comma-separated): {Colors.RESET}").strip()
-    packages = mh.filter_packages(filters)
-    rpm_urls = get_package_rpm_urls(
-        primary_root, Config.REPO_BASE_URL, packages)
-    if not rpm_urls:
-        print(f"{Colors.FG_RED}No RPM URLs found with the given filter.{Colors.RESET}")
+    all_packages = resolve_package_list_with_prompt(mh)
+    if not all_packages:
         return
+
+    rpm_urls = get_package_rpm_urls(
+        primary_root, Config.REPO_BASE_URL, all_packages)
+
+    if not rpm_urls:
+        print(
+            f"{Colors.FG_RED}No RPM URLs found for the selected packages.{Colors.RESET}")
+        return
+
     for pkg, url in rpm_urls:
         print(f"{Colors.FG_MAGENTA}{pkg:<30}{Colors.FG_CYAN}{url}{Colors.RESET}")
 
 
 def download_packages_ui(mh, primary_root):
-    filters = input(
-        f"{Colors.FG_CYAN}Enter package names or wildcards (comma-separated): {Colors.RESET}").strip()
-    packages = []
-    for f in filters.split(','):
-        packages.extend(mh.filter_packages(f.strip()))
-    download_deps = input(
-        f"{Colors.FG_CYAN}Download dependencies as well? (y/N): {Colors.RESET}").strip().lower() in ['y', 'yes', '1', 'true']
-    download_packages(packages, mh.dep_map, primary_root, download_deps)
+    all_packages = resolve_package_list_with_prompt(mh)
+    if not all_packages:
+        return
+
+    download_packages(all_packages, mh.dep_map, primary_root,
+                      download_deps=False)  # We already included deps above
 
 
 def configure_settings(mh=None, primary_root=None):
