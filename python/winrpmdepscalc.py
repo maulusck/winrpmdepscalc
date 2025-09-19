@@ -164,9 +164,8 @@ def get_package_rpm_urls(root_element, base_url, package_names):
         href = location_elem.attrib.get("href")
         if href:
             # Construct the full URL from the base URL and the href
-            full_url = urljoin(
-                base_url, href
-            )  # This takes care of subdirectories dynamically
+            # This takes care of subdirectories dynamically
+            full_url = urljoin(base_url, href)
             rpm_urls.append((name_elem.text, full_url))
 
     return rpm_urls
@@ -403,9 +402,9 @@ def main():
         print(
             f"{Colors.FG_YELLOW}5) List RPM URLs by starting letters/string{Colors.RESET}"
         )
-        # Removed old options 6 and 7 for downloads, now combined:
+        # Moved option 7 to 6
         print(
-            f"{Colors.FG_YELLOW}7) Download packages by wildcard or list (e.g. '*zabbix*' or 'vim,wget'){Colors.RESET}"
+            f"{Colors.FG_YELLOW}6) Download packages by wildcard or list (e.g. '*zabbix*' or 'vim,wget'){Colors.RESET}"
         )
         print(f"{Colors.FG_YELLOW}9) Configure settings{Colors.RESET}")
         print(f"{Colors.FG_YELLOW}0) Exit{Colors.RESET}")
@@ -469,7 +468,7 @@ def main():
                         f"{Colors.FG_MAGENTA}{pkg_name:<30}{Colors.FG_CYAN}{url}{Colors.RESET}"
                     )
 
-        elif choice == "7":
+        elif choice == "6":  # Changed from "7" to "6"
             user_input = input(
                 f"{Colors.FG_CYAN}Enter wildcard pattern (e.g. '*zabbix*') or comma-separated package names: {Colors.RESET}"
             ).strip()
