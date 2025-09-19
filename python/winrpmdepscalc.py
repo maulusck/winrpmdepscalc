@@ -3,20 +3,18 @@ import os
 import lzma
 import gzip
 import bz2
-import magic  # python-magic-bin
-import fnmatch  # for wildcard matching
-from urllib.parse import urljoin  # To handle URL joining properly
+import magic
+import fnmatch
+from urllib.parse import urljoin
 import xml.etree.ElementTree as ET
 from collections import deque, defaultdict
 
 
-# ANSI escape codes for colors and styles
 class Colors:
     RESET = "\033[0m"
     BOLD = "\033[1m"
     UNDERLINE = "\033[4m"
 
-    # Foreground colors
     FG_RED = "\033[31m"
     FG_GREEN = "\033[32m"
     FG_YELLOW = "\033[33m"
@@ -26,7 +24,6 @@ class Colors:
     FG_WHITE = "\033[97m"
     FG_BRIGHT_BLACK = "\033[90m"
 
-    # Background colors (if needed)
     BG_RED = "\033[41m"
     BG_GREEN = "\033[42m"
     BG_YELLOW = "\033[43m"
@@ -45,7 +42,7 @@ class Config:
     PACKAGE_COLUMNS = 4
     PACKAGE_COLUMN_WIDTH = 30
     DOWNLOAD_DIR = "rpms"
-    SUPPORT_WEAK_DEPS = False  # default: disabled
+    SUPPORT_WEAK_DEPS = False
 
     @classmethod
     def print_config(cls):
@@ -119,7 +116,6 @@ class MetadataHandler:
             print(
                 f"{Colors.FG_GREEN}All metadata files present, skipping refresh.{Colors.RESET}")
 
-        # After refreshing, reset variables
         self.reset_variables()
 
     def cleanup_files(self):
@@ -137,7 +133,6 @@ class MetadataHandler:
         if not deleted_any:
             print(f"{Colors.FG_YELLOW}No metadata files to remove.{Colors.RESET}")
 
-        # Reset the variables after cleanup
         self.reset_variables()
 
     def build_maps(self, root_element):
@@ -145,11 +140,10 @@ class MetadataHandler:
             "common": "http://linux.duke.edu/metadata/common",
             "rpm": "http://linux.duke.edu/metadata/rpm",
         }
-        provides_map = defaultdict(set)  # file/lib -> packages providing it
-        requires_map = {}  # package -> set of required files/libs
+        provides_map = defaultdict(set)
+        requires_map = {}
         packages_with_format = []
 
-        # First pass: build provides_map and gather package info
         for package in root_element.findall("common:package", ns):
             name_elem = package.find("common:name", ns)
             if name_elem is None:
@@ -161,7 +155,6 @@ class MetadataHandler:
                 requires_map[pkg_name] = set()
                 continue
 
-            # Provides
             provides = format_elem.find("rpm:provides", ns)
             if provides is not None:
                 for entry in provides.findall("rpm:entry", ns):
@@ -171,7 +164,6 @@ class MetadataHandler:
 
             packages_with_format.append((pkg_name, format_elem))
 
-        # Second pass: build requires_map
         for pkg_name, format_elem in packages_with_format:
             requires = format_elem.find("rpm:requires", ns)
             reqs = set()
@@ -181,7 +173,6 @@ class MetadataHandler:
                     if rname:
                         reqs.add(rname)
 
-                # Support weak dependencies if enabled in config
                 if Config.SUPPORT_WEAK_DEPS:
                     weak_requires = format_elem.find("rpm:weakrequires", ns)
                     if weak_requires is not None:
@@ -192,12 +183,11 @@ class MetadataHandler:
 
             requires_map[pkg_name] = reqs
 
-        # Third pass: build dep_map (package -> set of packages that satisfy its requirements)
         dep_map = {}
         for pkg_name, reqs in requires_map.items():
             deps = set()
             for req in reqs:
-                # Add all packages that provide this required file/lib
+
                 if req in provides_map:
                     deps.update(provides_map[req])
             dep_map[pkg_name] = deps
@@ -211,15 +201,14 @@ class MetadataHandler:
         """
         filtered_packages = set()
 
-        # Handle wildcard pattern (*)
         pattern = fnmatch.fnmatch
 
         for pkg in self.all_packages:
             for part in input_str.split(','):
-                part = part.strip()  # Remove extra spaces
+                part = part.strip()
                 if pattern(pkg, part):
                     filtered_packages.add(pkg)
-                    break  # No need to check further patterns for this package
+                    break
 
         return sorted(filtered_packages)
 
@@ -314,8 +303,7 @@ def get_package_rpm_urls(root_element, base_url, package_names):
 
         href = location_elem.attrib.get("href")
         if href:
-            # Construct the full URL from the base URL and the href
-            # This takes care of subdirectories dynamically
+
             full_url = urljoin(base_url, href)
             rpm_urls.append((name_elem.text, full_url))
 
@@ -425,13 +413,12 @@ def download_packages(package_names, dep_map, primary_root, download_deps=False)
     :param primary_root: Root of the parsed XML metadata.
     :param download_deps: Flag to decide if dependencies should be downloaded.
     """
-    # Ensure download directory exists
+
     if not os.path.exists(Config.DOWNLOAD_DIR):
         os.makedirs(Config.DOWNLOAD_DIR)
 
     packages_to_download = set(package_names)
 
-    # If dependencies should be downloaded, resolve and add dependencies
     if download_deps:
         all_deps = set()
         for pkg in package_names:
@@ -439,13 +426,12 @@ def download_packages(package_names, dep_map, primary_root, download_deps=False)
             if resolved_deps is not None:
                 all_deps.update(resolved_deps)
 
-        # Combine both the initial package names and their resolved dependencies
         packages_to_download.update(all_deps)
 
     print(f"{Colors.FG_CYAN}Downloading the following packages: {', '.join(packages_to_download)}{Colors.RESET}")
 
     for pkg in packages_to_download:
-        if pkg not in package_names:  # Make sure we're not re-downloading the same package
+        if pkg not in package_names:
             print(
                 f"{Colors.FG_CYAN}Downloading dependencies for {pkg}...{Colors.RESET}")
         rpm_urls = get_package_rpm_urls(
@@ -472,7 +458,6 @@ def download_packages(package_names, dep_map, primary_root, download_deps=False)
 def main():
     metadata_handler = MetadataHandler()
 
-    # Initialize metadata
     metadata_handler.check_and_refresh_metadata()
 
     primary_root = parse_xml(Config.LOCAL_XML_FILE)
@@ -500,16 +485,13 @@ def main():
             start = input(
                 f"{Colors.FG_CYAN}Enter a string to filter RPM package names (use '*' for wildcards, comma-separated for multiple): {Colors.RESET}").strip()
 
-            # Split the user input by commas and process each filter
             filtered = []
             for filter_str in start.split(','):
                 filtered.extend(metadata_handler.filter_packages_by_input(
-                    filter_str.strip()))  # Call method on metadata_handler
+                    filter_str.strip()))
 
-            # Remove duplicates and sort the result
             filtered = sorted(set(filtered))
 
-            # Print the filtered package list
             print_packages_tabular(filtered)
 
         elif choice == "2":
@@ -541,7 +523,7 @@ def main():
             start = input(
                 f"{Colors.FG_CYAN}Enter a string to filter RPM package names (use '*' for wildcards, comma-separated for multiple): {Colors.RESET}").strip()
             package_names = metadata_handler.filter_packages_by_input(
-                start)  # Call method on metadata_handler
+                start)
             rpm_urls = get_package_rpm_urls(
                 primary_root, Config.REPO_BASE_URL, package_names)
             if not rpm_urls:
@@ -556,18 +538,15 @@ def main():
             user_input = input(
                 f"{Colors.FG_CYAN}Enter package names or wildcard (e.g., 'vim-*,chromium,*vlc*'): {Colors.RESET}").strip()
 
-            # Split the user input by commas and process each filter
             packages = []
             for filter_str in user_input.split(','):
                 packages.extend(metadata_handler.filter_packages_by_input(
-                    filter_str.strip()))  # Call method on metadata_handler
+                    filter_str.strip()))
 
-            # Ask the user whether they want to download dependencies
             download_deps_input = input(
                 f"{Colors.FG_CYAN}Do you want to download dependencies as well? (y/n): {Colors.RESET}").strip().lower()
             download_deps = download_deps_input in ['y', 'yes', '1', 'true']
 
-            # Call the function to download packages, passing the download_deps flag
             download_packages(
                 packages, metadata_handler.dep_map, primary_root, download_deps)
 
