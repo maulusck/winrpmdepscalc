@@ -73,6 +73,157 @@ class Config:
             return False
 
 
+class MetadataHandler:
+    def __init__(self):
+        self.all_packages = []
+        self.requires_map = {}
+        self.provides_map = defaultdict(set)
+        self.dep_map = {}
+
+    def reset_variables(self):
+        self.all_packages = []
+        self.requires_map = {}
+        self.provides_map = defaultdict(set)
+        self.dep_map = {}
+        print(f"{Colors.FG_CYAN}Metadata state has been reset.{Colors.RESET}")
+
+    def check_and_refresh_metadata(self):
+        """
+        Implements workflow option 3:
+        Conditional re-fetch based on metadata availability.
+        """
+        files = [Config.LOCAL_REPOMD_FILE,
+                 Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
+
+        missing_files = [f for f in files if not os.path.exists(f)]
+
+        if missing_files:
+            print(
+                f"{Colors.FG_YELLOW}Metadata files missing or removed: {', '.join(missing_files)}{Colors.RESET}")
+            print(f"{Colors.FG_CYAN}Refreshing metadata files now.{Colors.RESET}")
+            repomd_url = Config.REPO_BASE_URL + Config.REPOMD_XML
+
+            download_file_powershell(repomd_url, Config.LOCAL_REPOMD_FILE)
+
+            repomd_root = parse_xml(Config.LOCAL_REPOMD_FILE)
+            primary_url = get_primary_location_url(
+                repomd_root, Config.REPO_BASE_URL)
+            if not primary_url:
+                raise RuntimeError(
+                    "Could not find primary metadata URL in repomd.xml")
+
+            download_file_powershell(primary_url, Config.LOCAL_XZ_FILE)
+
+            decompress_file(Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE)
+        else:
+            print(
+                f"{Colors.FG_GREEN}All metadata files present, skipping refresh.{Colors.RESET}")
+
+        # After refreshing, reset variables
+        self.reset_variables()
+
+    def cleanup_files(self):
+        files = [Config.LOCAL_REPOMD_FILE,
+                 Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
+        deleted_any = False
+        for f in files:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                    print(f"{Colors.FG_GREEN}Removed {f}{Colors.RESET}")
+                    deleted_any = True
+                except Exception as e:
+                    print(f"{Colors.FG_RED}Failed to remove {f}: {e}{Colors.RESET}")
+        if not deleted_any:
+            print(f"{Colors.FG_YELLOW}No metadata files to remove.{Colors.RESET}")
+
+        # Reset the variables after cleanup
+        self.reset_variables()
+
+    def build_maps(self, root_element):
+        ns = {
+            "common": "http://linux.duke.edu/metadata/common",
+            "rpm": "http://linux.duke.edu/metadata/rpm",
+        }
+        provides_map = defaultdict(set)  # file/lib -> packages providing it
+        requires_map = {}  # package -> set of required files/libs
+        packages_with_format = []
+
+        # First pass: build provides_map and gather package info
+        for package in root_element.findall("common:package", ns):
+            name_elem = package.find("common:name", ns)
+            if name_elem is None:
+                continue
+            pkg_name = name_elem.text
+
+            format_elem = package.find("common:format", ns)
+            if format_elem is None:
+                requires_map[pkg_name] = set()
+                continue
+
+            # Provides
+            provides = format_elem.find("rpm:provides", ns)
+            if provides is not None:
+                for entry in provides.findall("rpm:entry", ns):
+                    pname = entry.get("name")
+                    if pname:
+                        provides_map[pname].add(pkg_name)
+
+            packages_with_format.append((pkg_name, format_elem))
+
+        # Second pass: build requires_map
+        for pkg_name, format_elem in packages_with_format:
+            requires = format_elem.find("rpm:requires", ns)
+            reqs = set()
+            if requires is not None:
+                for entry in requires.findall("rpm:entry", ns):
+                    rname = entry.get("name")
+                    if rname:
+                        reqs.add(rname)
+
+                # Support weak dependencies if enabled in config
+                if Config.SUPPORT_WEAK_DEPS:
+                    weak_requires = format_elem.find("rpm:weakrequires", ns)
+                    if weak_requires is not None:
+                        for entry in weak_requires.findall("rpm:entry", ns):
+                            rname = entry.get("name")
+                            if rname:
+                                reqs.add(rname)
+
+            requires_map[pkg_name] = reqs
+
+        # Third pass: build dep_map (package -> set of packages that satisfy its requirements)
+        dep_map = {}
+        for pkg_name, reqs in requires_map.items():
+            deps = set()
+            for req in reqs:
+                # Add all packages that provide this required file/lib
+                if req in provides_map:
+                    deps.update(provides_map[req])
+            dep_map[pkg_name] = deps
+
+        return requires_map, provides_map, dep_map
+
+    def filter_packages_by_input(self, input_str):
+        """
+        Filters the list of packages based on the given input string.
+        Supports wildcards using '*' and comma-separated values.
+        """
+        filtered_packages = set()
+
+        # Handle wildcard pattern (*)
+        pattern = fnmatch.fnmatch
+
+        for pkg in self.all_packages:
+            for part in input_str.split(','):
+                part = part.strip()  # Remove extra spaces
+                if pattern(pkg, part):
+                    filtered_packages.add(pkg)
+                    break  # No need to check further patterns for this package
+
+        return sorted(filtered_packages)
+
+
 def download_file_powershell(url, output_file):
     ps_script = f"""
     $wc = New-Object System.Net.WebClient
@@ -205,71 +356,6 @@ def print_packages_tabular(packages, columns=None, column_width=None):
         print()
 
 
-def build_maps(root_element):
-    ns = {
-        "common": "http://linux.duke.edu/metadata/common",
-        "rpm": "http://linux.duke.edu/metadata/rpm",
-    }
-    provides_map = defaultdict(set)  # file/lib -> packages providing it
-    requires_map = {}  # package -> set of required files/libs
-    packages_with_format = []
-
-    # First pass: build provides_map and gather package info
-    for package in root_element.findall("common:package", ns):
-        name_elem = package.find("common:name", ns)
-        if name_elem is None:
-            continue
-        pkg_name = name_elem.text
-
-        format_elem = package.find("common:format", ns)
-        if format_elem is None:
-            requires_map[pkg_name] = set()
-            continue
-
-        # Provides
-        provides = format_elem.find("rpm:provides", ns)
-        if provides is not None:
-            for entry in provides.findall("rpm:entry", ns):
-                pname = entry.get("name")
-                if pname:
-                    provides_map[pname].add(pkg_name)
-
-        packages_with_format.append((pkg_name, format_elem))
-
-    # Second pass: build requires_map
-    for pkg_name, format_elem in packages_with_format:
-        requires = format_elem.find("rpm:requires", ns)
-        reqs = set()
-        if requires is not None:
-            for entry in requires.findall("rpm:entry", ns):
-                rname = entry.get("name")
-                if rname:
-                    reqs.add(rname)
-
-            # Support weak dependencies if enabled in config
-            if Config.SUPPORT_WEAK_DEPS:
-                weak_requires = format_elem.find("rpm:weakrequires", ns)
-                if weak_requires is not None:
-                    for entry in weak_requires.findall("rpm:entry", ns):
-                        rname = entry.get("name")
-                        if rname:
-                            reqs.add(rname)
-
-        requires_map[pkg_name] = reqs
-
-    # Third pass: build dep_map (package -> set of packages that satisfy its requirements)
-    dep_map = {}
-    for pkg_name, reqs in requires_map.items():
-        deps = set()
-        for req in reqs:
-            # Add all packages that provide this required file/lib
-            if req in provides_map:
-                deps.update(provides_map[req])
-        dep_map[pkg_name] = deps
-
-    return requires_map, provides_map, dep_map
-
-
 def whatrequires(pkg_name, requires_map):
     return requires_map.get(pkg_name, set())
 
@@ -330,82 +416,80 @@ def configure_settings():
         Config.set_config(key, new_value)
 
 
-def cleanup_files():
-    files = [Config.LOCAL_REPOMD_FILE,
-             Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
-    deleted_any = False
-    for f in files:
-        if os.path.exists(f):
-            try:
-                os.remove(f)
-                print(f"{Colors.FG_GREEN}Removed {f}{Colors.RESET}")
-                deleted_any = True
-            except Exception as e:
-                print(f"{Colors.FG_RED}Failed to remove {f}: {e}{Colors.RESET}")
-    if not deleted_any:
-        print(f"{Colors.FG_YELLOW}No metadata files to remove.{Colors.RESET}")
-
-
-def check_and_refresh_metadata():
+def download_packages(package_names, dep_map, primary_root, download_deps=False):
     """
-    Implements workflow option 3:
-    Conditional re-fetch based on metadata availability.
+    Downloads the specified packages (and optionally their dependencies).
+
+    :param package_names: List of package names to download.
+    :param dep_map: Dependency map that maps packages to their dependencies.
+    :param primary_root: Root of the parsed XML metadata.
+    :param download_deps: Flag to decide if dependencies should be downloaded.
     """
-    files = [Config.LOCAL_REPOMD_FILE,
-             Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE]
+    # Ensure download directory exists
+    if not os.path.exists(Config.DOWNLOAD_DIR):
+        os.makedirs(Config.DOWNLOAD_DIR)
 
-    missing_files = [f for f in files if not os.path.exists(f)]
+    packages_to_download = set(package_names)
 
-    if missing_files:
-        print(
-            f"{Colors.FG_YELLOW}Metadata files missing or removed: {', '.join(missing_files)}{Colors.RESET}"
-        )
-        print(f"{Colors.FG_CYAN}Refreshing metadata files now.{Colors.RESET}")
-        repomd_url = Config.REPO_BASE_URL + Config.REPOMD_XML
+    # If dependencies should be downloaded, resolve and add dependencies
+    if download_deps:
+        all_deps = set()
+        for pkg in package_names:
+            resolved_deps = resolve_all_dependencies(pkg, dep_map)
+            if resolved_deps is not None:
+                all_deps.update(resolved_deps)
 
-        download_file_powershell(repomd_url, Config.LOCAL_REPOMD_FILE)
+        # Combine both the initial package names and their resolved dependencies
+        packages_to_download.update(all_deps)
 
-        repomd_root = parse_xml(Config.LOCAL_REPOMD_FILE)
-        primary_url = get_primary_location_url(
-            repomd_root, Config.REPO_BASE_URL)
-        if not primary_url:
-            raise RuntimeError(
-                "Could not find primary metadata URL in repomd.xml")
+    print(f"{Colors.FG_CYAN}Downloading the following packages: {', '.join(packages_to_download)}{Colors.RESET}")
 
-        download_file_powershell(primary_url, Config.LOCAL_XZ_FILE)
-
-        decompress_file(Config.LOCAL_XZ_FILE, Config.LOCAL_XML_FILE)
-
-    else:
-        print(
-            f"{Colors.FG_GREEN}All metadata files present, skipping refresh.{Colors.RESET}"
-        )
-
-
-# --- Inside your main() function, replace download options with this single option 7 ---
+    for pkg in packages_to_download:
+        if pkg not in package_names:  # Make sure we're not re-downloading the same package
+            print(
+                f"{Colors.FG_CYAN}Downloading dependencies for {pkg}...{Colors.RESET}")
+        rpm_urls = get_package_rpm_urls(
+            primary_root, Config.REPO_BASE_URL, [pkg])
+        if rpm_urls:
+            for _, url in rpm_urls:
+                dest_path = os.path.join(
+                    Config.DOWNLOAD_DIR, os.path.basename(url))
+                if os.path.exists(dest_path):
+                    print(
+                        f"{Colors.FG_YELLOW}Already downloaded: {os.path.basename(url)}{Colors.RESET}")
+                else:
+                    try:
+                        download_file_powershell(url, dest_path)
+                        print(
+                            f"{Colors.FG_GREEN}Downloaded: {os.path.basename(url)}{Colors.RESET}")
+                    except Exception as e:
+                        print(
+                            f"{Colors.FG_RED}Failed to download {os.path.basename(url)}: {e}{Colors.RESET}")
+        else:
+            print(f"{Colors.FG_RED}No RPM URLs found for {pkg}{Colors.RESET}")
 
 
 def main():
-    check_and_refresh_metadata()
+    metadata_handler = MetadataHandler()
+
+    # Initialize metadata
+    metadata_handler.check_and_refresh_metadata()
 
     primary_root = parse_xml(Config.LOCAL_XML_FILE)
 
-    all_packages = get_all_packages(primary_root)
-    requires_map, provides_map, dep_map = build_maps(primary_root)
+    metadata_handler.all_packages = get_all_packages(primary_root)
+    metadata_handler.requires_map, metadata_handler.provides_map, metadata_handler.dep_map = metadata_handler.build_maps(
+        primary_root)
 
     while True:
         print(f"\n{Colors.BOLD}{Colors.FG_BLUE}--- MENU ---{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}1) List packages by starting letters{Colors.RESET}")
+        print(f"{Colors.FG_YELLOW}1) List packages by wildcard or list{Colors.RESET}")
         print(f"{Colors.FG_YELLOW}2) Calculate dependencies for package{Colors.RESET}")
         print(f"{Colors.FG_YELLOW}3) Refresh metadata files if missing{Colors.RESET}")
         print(f"{Colors.FG_YELLOW}4) Cleanup metadata files{Colors.RESET}")
+        print(f"{Colors.FG_YELLOW}5) List RPM URLs by wildcard or list{Colors.RESET}")
         print(
-            f"{Colors.FG_YELLOW}5) List RPM URLs by starting letters/string{Colors.RESET}"
-        )
-        # Moved option 7 to 6
-        print(
-            f"{Colors.FG_YELLOW}6) Download packages by wildcard or list (e.g. '*zabbix*' or 'vim,wget'){Colors.RESET}"
-        )
+            f"{Colors.FG_YELLOW}6) Download packages by wildcard or list{Colors.RESET}")
         print(f"{Colors.FG_YELLOW}9) Configure settings{Colors.RESET}")
         print(f"{Colors.FG_YELLOW}0) Exit{Colors.RESET}")
 
@@ -414,118 +498,88 @@ def main():
 
         if choice == "1":
             start = input(
-                f"{Colors.FG_CYAN}Enter starting letters/string (empty to list all): {Colors.RESET}"
-            ).strip()
-            filtered = (
-                [pkg for pkg in all_packages if pkg.startswith(start)]
-                if start
-                else all_packages
-            )
+                f"{Colors.FG_CYAN}Enter a string to filter RPM package names (use '*' for wildcards, comma-separated for multiple): {Colors.RESET}").strip()
+
+            # Split the user input by commas and process each filter
+            filtered = []
+            for filter_str in start.split(','):
+                filtered.extend(metadata_handler.filter_packages_by_input(
+                    filter_str.strip()))  # Call method on metadata_handler
+
+            # Remove duplicates and sort the result
+            filtered = sorted(set(filtered))
+
+            # Print the filtered package list
             print_packages_tabular(filtered)
 
         elif choice == "2":
             pkg = input(
                 f"{Colors.FG_CYAN}Enter package name: {Colors.RESET}").strip()
-            if pkg not in dep_map:
+            if pkg not in metadata_handler.dep_map:
                 print(f"{Colors.FG_RED}Package '{pkg}' not found.{Colors.RESET}")
                 continue
-            resolved = resolve_all_dependencies(pkg, dep_map)
+            resolved = resolve_all_dependencies(pkg, metadata_handler.dep_map)
             if resolved is None:
                 print(
-                    f"{Colors.FG_RED}Could not resolve dependencies for {pkg}{Colors.RESET}"
-                )
+                    f"{Colors.FG_RED}Could not resolve dependencies for {pkg}{Colors.RESET}")
                 continue
             print(
-                f"{Colors.FG_GREEN}Dependencies for {pkg} (including package itself):{Colors.RESET}"
-            )
+                f"{Colors.FG_GREEN}Dependencies for {pkg} (including package itself):{Colors.RESET}")
             print_packages_tabular(sorted(resolved))
 
         elif choice == "3":
-            check_and_refresh_metadata()
+            metadata_handler.check_and_refresh_metadata()
+            primary_root = parse_xml(Config.LOCAL_XML_FILE)
+            metadata_handler.all_packages = get_all_packages(primary_root)
+            metadata_handler.requires_map, metadata_handler.provides_map, metadata_handler.dep_map = metadata_handler.build_maps(
+                primary_root)
 
         elif choice == "4":
-            cleanup_files()
+            metadata_handler.cleanup_files()
 
         elif choice == "5":
             start = input(
-                f"{Colors.FG_CYAN}Enter starting letters/string for RPM URLs (empty to list all): {Colors.RESET}"
-            ).strip()
-            package_names = (
-                [pkg for pkg in all_packages if pkg.startswith(start)]
-                if start
-                else all_packages
-            )
+                f"{Colors.FG_CYAN}Enter a string to filter RPM package names (use '*' for wildcards, comma-separated for multiple): {Colors.RESET}").strip()
+            package_names = metadata_handler.filter_packages_by_input(
+                start)  # Call method on metadata_handler
             rpm_urls = get_package_rpm_urls(
-                primary_root, Config.REPO_BASE_URL, package_names
-            )
+                primary_root, Config.REPO_BASE_URL, package_names)
             if not rpm_urls:
                 print(
-                    f"{Colors.FG_RED}No RPM URLs found with given filter.{Colors.RESET}"
-                )
+                    f"{Colors.FG_RED}No RPM URLs found with the given filter.{Colors.RESET}")
             else:
                 for pkg_name, url in rpm_urls:
                     print(
-                        f"{Colors.FG_MAGENTA}{pkg_name:<30}{Colors.FG_CYAN}{url}{Colors.RESET}"
-                    )
+                        f"{Colors.FG_MAGENTA}{pkg_name:<30}{Colors.FG_CYAN}{url}{Colors.RESET}")
 
-        elif choice == "6":  # Changed from "7" to "6"
+        elif choice == "6":
             user_input = input(
-                f"{Colors.FG_CYAN}Enter wildcard pattern (e.g. '*zabbix*') or comma-separated package names: {Colors.RESET}"
-            ).strip()
+                f"{Colors.FG_CYAN}Enter package names or wildcard (e.g., 'vim-*,chromium,*vlc*'): {Colors.RESET}").strip()
 
-            if "," in user_input:
-                # Treat as exact package names list
-                package_names = [
-                    pkg.strip() for pkg in user_input.split(",") if pkg.strip()
-                ]
-                valid_packages = [
-                    pkg for pkg in package_names if pkg in all_packages]
-                missing_packages = [
-                    pkg for pkg in package_names if pkg not in all_packages
-                ]
+            # Split the user input by commas and process each filter
+            packages = []
+            for filter_str in user_input.split(','):
+                packages.extend(metadata_handler.filter_packages_by_input(
+                    filter_str.strip()))  # Call method on metadata_handler
 
-                if missing_packages:
-                    print(
-                        f"{Colors.FG_YELLOW}Warning: These packages were not found and will be skipped: {', '.join(missing_packages)}{Colors.RESET}"
-                    )
-                if not valid_packages:
-                    print(
-                        f"{Colors.FG_RED}No valid packages to download.{Colors.RESET}"
-                    )
-                    continue
-            else:
-                # Treat as wildcard pattern
-                pattern = user_input
-                valid_packages = [
-                    pkg for pkg in all_packages if fnmatch.fnmatch(pkg, pattern)
-                ]
-                if not valid_packages:
-                    print(
-                        f"{Colors.FG_RED}No packages matched the pattern '{pattern}'.{Colors.RESET}"
-                    )
-                    continue
+            # Ask the user whether they want to download dependencies
+            download_deps_input = input(
+                f"{Colors.FG_CYAN}Do you want to download dependencies as well? (y/n): {Colors.RESET}").strip().lower()
+            download_deps = download_deps_input in ['y', 'yes', '1', 'true']
 
-            rpm_urls = get_package_rpm_urls(
-                primary_root, Config.REPO_BASE_URL, valid_packages
-            )
-            if not rpm_urls:
-                print(
-                    f"{Colors.FG_RED}No RPM URLs found for selected packages.{Colors.RESET}"
-                )
-            else:
-                download_rpms(rpm_urls, Config.DOWNLOAD_DIR)
+            # Call the function to download packages, passing the download_deps flag
+            download_packages(
+                packages, metadata_handler.dep_map, primary_root, download_deps)
 
         elif choice == "9":
             configure_settings()
 
         elif choice == "0":
-            print(f"{Colors.FG_GREEN}Exiting program. Goodbye!{Colors.RESET}")
+            print(f"{Colors.FG_GREEN}Goodbye!{Colors.RESET}")
             break
 
         else:
-            print(
-                f"{Colors.FG_RED}Invalid choice. Please select a valid menu option.{Colors.RESET}"
-            )
+            print(f"{Colors.FG_RED}Invalid choice, please try again.{Colors.RESET}")
 
 
 if __name__ == "__main__":
