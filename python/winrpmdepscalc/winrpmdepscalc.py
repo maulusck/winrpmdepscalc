@@ -14,6 +14,9 @@ import requests
 import urllib3
 from requests_negotiate_sspi import HttpNegotiateAuth
 from enum import Enum
+import argparse
+import sys
+import yaml
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -94,11 +97,9 @@ class Downloader:
         proxies = {}
 
         if proxy_url:
-
             proxies["http"] = proxy_url
             proxies["https"] = proxy_url
         else:
-
             system_proxies = urllib.request.getproxies()
             http_proxy = system_proxies.get("http")
             https_proxy = system_proxies.get("https")
@@ -164,6 +165,14 @@ class Config:
             setattr(cls, key, value)
             print(f"{Colors.FG_GREEN}Updated {key} to: {value}{Colors.RESET}")
             return True
+
+    @classmethod
+    def update_from_dict(cls, data: dict):
+        # Update config with dict keys if attribute exists
+        for key, value in data.items():
+            if hasattr(cls, key):
+                # Convert bools from yaml if necessary (yaml loads bools natively)
+                setattr(cls, key, value)
 
 
 class MetadataHandler:
@@ -586,18 +595,47 @@ def exit_program(*_):
     exit(0)
 
 
-def main():
-    metadata_handler = MetadataHandler()
-    metadata_handler.check_and_refresh_metadata()
-    primary_root = parse_xml(Config.LOCAL_XML_FILE)
-    if primary_root is None:
-        print(
-            f"{Colors.FG_RED}Failed to parse primary metadata XML file, exiting.{Colors.RESET}")
-        return
-    metadata_handler.all_packages = get_all_packages(primary_root)
-    metadata_handler.requires_map, metadata_handler.provides_map, metadata_handler.dep_map = metadata_handler.build_maps(
-        primary_root)
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Windows RPM Package Metadata Tool")
+    parser.add_argument('config', nargs='?', default=None,
+                        help="Path to YAML config file")
+    parser.add_argument('--list-packages', action='store_true',
+                        help="List packages by wildcard or list")
+    parser.add_argument('--calc-deps', metavar='PACKAGE',
+                        help="Calculate dependencies for package")
+    parser.add_argument('--refresh-meta', action='store_true',
+                        help="Refresh metadata files if missing")
+    parser.add_argument('--cleanup-meta', action='store_true',
+                        help="Cleanup metadata files")
+    parser.add_argument('--list-rpm-urls', action='store_true',
+                        help="List RPM URLs by wildcard or list")
+    parser.add_argument('--download', action='store_true',
+                        help="Download packages by wildcard or list")
+    parser.add_argument('--configure', action='store_true',
+                        help="Configure settings interactively")
+    parser.add_argument('--no-interactive', action='store_true',
+                        help="Do not enter interactive mode if no commands given")
+    return parser.parse_args()
 
+
+def load_yaml_config(config_path):
+    try:
+        with open(config_path, 'r') as f:
+            data = yaml.safe_load(f)
+            if data is None:
+                print(
+                    f"{Colors.FG_YELLOW}Config file {config_path} is empty.{Colors.RESET}")
+                return
+            Config.update_from_dict(data)
+            print(f"{Colors.FG_GREEN}Loaded config from {config_path}{Colors.RESET}")
+    except Exception as e:
+        print(
+            f"{Colors.FG_RED}Failed to load config file {config_path}: {e}{Colors.RESET}")
+        sys.exit(1)
+
+
+def run_interactive_menu(metadata_handler, primary_root):
     menu_options = {
         "1": list_packages,
         "2": calculate_dependencies,
@@ -631,6 +669,63 @@ def main():
                 print(f"{Colors.FG_RED}Error during operation: {e}{Colors.RESET}")
         else:
             print(f"{Colors.FG_RED}Invalid choice, please try again.{Colors.RESET}")
+
+
+def print_dependencies_for_package(pkg_name, metadata_handler):
+    if pkg_name not in metadata_handler.dep_map:
+        print(f"{Colors.FG_RED}Package '{pkg_name}' not found.{Colors.RESET}")
+        return
+    resolved = resolve_all_dependencies(pkg_name, metadata_handler.dep_map)
+    if not resolved:
+        print(
+            f"{Colors.FG_RED}Could not resolve dependencies for {pkg_name}{Colors.RESET}")
+        return
+    print(f"{Colors.FG_GREEN}Dependencies for {pkg_name} (including itself):{Colors.RESET}")
+    print_packages_tabular(sorted(resolved))
+
+
+def main():
+    args = parse_args()
+    if args.config:
+        load_yaml_config(args.config)
+
+    metadata_handler = MetadataHandler()
+    metadata_handler.check_and_refresh_metadata()
+    primary_root = parse_xml(Config.LOCAL_XML_FILE)
+    if primary_root is None:
+        print(
+            f"{Colors.FG_RED}Failed to parse primary metadata XML file, exiting.{Colors.RESET}")
+        return
+    metadata_handler.all_packages = get_all_packages(primary_root)
+    metadata_handler.requires_map, metadata_handler.provides_map, metadata_handler.dep_map = metadata_handler.build_maps(
+        primary_root)
+
+    performed_action = False
+
+    if args.list_packages:
+        list_packages(metadata_handler, primary_root)
+        performed_action = True
+    if args.calc_deps:
+        print_dependencies_for_package(args.calc_deps, metadata_handler)
+        performed_action = True
+    if args.refresh_meta:
+        refresh_metadata(metadata_handler, primary_root)
+        performed_action = True
+    if args.cleanup_meta:
+        cleanup_metadata(metadata_handler, primary_root)
+        performed_action = True
+    if args.list_rpm_urls:
+        list_rpm_urls(metadata_handler, primary_root)
+        performed_action = True
+    if args.download:
+        download_packages_ui(metadata_handler, primary_root)
+        performed_action = True
+    if args.configure:
+        configure_settings(metadata_handler, primary_root)
+        performed_action = True
+
+    if not performed_action and not args.no_interactive:
+        run_interactive_menu(metadata_handler, primary_root)
 
 
 if __name__ == "__main__":
