@@ -1,34 +1,63 @@
-import os
+import argparse
 import fnmatch
-import subprocess
+import concurrent.futures
+import functools
+import logging
 import lzma
 import gzip
 import bz2
-import xml.etree.ElementTree as ET
-from collections import deque, defaultdict
-from urllib.parse import urljoin
-import urllib.request
-import requests
-import magic
-from tqdm import tqdm
-from enum import Enum
-import argparse
+import os
 import sys
+from collections import defaultdict, deque
+from enum import Enum
+from pathlib import Path
+from typing import Optional, List, Dict, Set, Tuple, Union
+from urllib.parse import urljoin
+
+import magic
+import requests
+import xml.etree.ElementTree as ET
+from tqdm import tqdm
 import yaml
 import urllib3
+import subprocess
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-class Colors:
+class LogColors:
     RESET = "\033[0m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    CYAN = "\033[36m"
+    MAGENTA = "\033[35m"
+    BLUE = "\033[34m"
     BOLD = "\033[1m"
-    FG_RED = "\033[31m"
-    FG_GREEN = "\033[32m"
-    FG_YELLOW = "\033[33m"
-    FG_CYAN = "\033[36m"
-    FG_MAGENTA = "\033[35m"
-    FG_BLUE = "\033[34m"
+
+
+class ColorFormatter(logging.Formatter):
+    COLOR_MAP = {
+        logging.DEBUG: LogColors.CYAN,
+        logging.INFO: LogColors.GREEN,
+        logging.WARNING: LogColors.YELLOW,
+        logging.ERROR: LogColors.RED,
+        logging.CRITICAL: LogColors.RED + LogColors.BOLD,
+    }
+
+    def format(self, record):
+        color = self.COLOR_MAP.get(record.levelno, LogColors.RESET)
+        message = super().format(record)
+        return f"{color}{message}{LogColors.RESET}"
+
+
+_logger = logging.getLogger("rpm_downloader")
+_logger.setLevel(logging.DEBUG)
+ch = logging.StreamHandler()
+ch.setLevel(logging.DEBUG)
+formatter = ColorFormatter("%(message)s")
+ch.setFormatter(formatter)
+_logger.addHandler(ch)
 
 
 class DownloaderType(Enum):
@@ -36,123 +65,159 @@ class DownloaderType(Enum):
     PYTHON = "python"
 
     @classmethod
-    def has_value(cls, value):
+    def has_value(cls, value: str) -> bool:
         return value.lower() in (item.value for item in cls)
 
 
 class Downloader:
-    def __init__(self, downloader_type="powershell", proxy_url=None):
+    def __init__(self, downloader_type: str = "powershell", proxy_url: Optional[str] = None, skip_ssl_verify: bool = True) -> None:
         dt = downloader_type.lower()
         if not DownloaderType.has_value(dt):
-            allowed = ', '.join([d.value for d in DownloaderType])
+            allowed = ', '.join(d.value for d in DownloaderType)
             raise ValueError(
                 f"Invalid downloader '{downloader_type}'. Allowed: {allowed}")
         self.downloader_type = DownloaderType(dt)
         self.proxy_url = proxy_url
+        self.session = None
+        if self.downloader_type == DownloaderType.PYTHON:
+            self.session = requests.Session()
+            proxies = {}
+            if proxy_url:
+                proxies = {"http": proxy_url, "https": proxy_url}
+            else:
+                proxies = {k: v for k, v in requests.utils.get_environ_proxies(
+                    "").items() if k in ("http", "https")} or {}
+            self.session.proxies.update(proxies)
+            self.session.verify = not skip_ssl_verify
 
-    def download(self, url, output_file):
+    def download(self, url: str, output_file: Union[str, Path]) -> None:
         if self.downloader_type == DownloaderType.POWERSHELL:
             self._download_powershell(url, output_file)
         else:
             self._download_python(url, output_file)
 
-    def _download_powershell(self, url, output_file):
-        ps_script = f"""
-        $wc = New-Object System.Net.WebClient
-        $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
-        $wc.DownloadFile('{url}', '{output_file}')
-        """
-        result = subprocess.run(["powershell", "-NoProfile", "-Command", ps_script],
-                                capture_output=True, text=True)
+    def _download_powershell(self, url: str, output_file: Union[str, Path]) -> None:
+        ps_script = (
+            f"$wc = New-Object System.Net.WebClient; "
+            f"$wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials; "
+            f"$wc.DownloadFile('{url}', '{output_file}');"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            capture_output=True, text=True
+        )
         if result.returncode != 0:
-            raise RuntimeError(f"PowerShell download failed:\n{result.stderr}")
+            _logger.error(
+                f"PowerShell download failed:\n{result.stderr.strip()}")
+            raise RuntimeError(
+                f"PowerShell download failed:\n{result.stderr.strip()}")
+        _logger.info(f"Downloaded {output_file} via PowerShell")
 
-    def _download_python(self, url, output_file):
-        proxies = {}
-        if self.proxy_url:
-            proxies = {"http": self.proxy_url, "https": self.proxy_url}
-        else:
-            system_proxies = urllib.request.getproxies()
-            proxies = {k: v for k, v in system_proxies.items()
-                       if k in ("http", "https")}
-
-        session = requests.Session()
-        with session.get(url, stream=True, proxies=proxies or None, verify=False) as resp:
-            resp.raise_for_status()
-            total = int(resp.headers.get("content-length", 0))
-            with open(output_file, 'wb') as f, tqdm(total=total, unit='iB', unit_scale=True, desc=os.path.basename(output_file)) as bar:
-                for chunk in resp.iter_content(1024):
-                    if chunk:
-                        f.write(chunk)
-                        bar.update(len(chunk))
+    def _download_python(self, url: str, output_file: Union[str, Path]) -> None:
+        if not self.session:
+            raise RuntimeError("Python downloader session not initialized")
+        try:
+            with self.session.get(url, stream=True) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length", 0))
+                with open(output_file, 'wb') as f, tqdm(
+                    total=total, unit='iB', unit_scale=True, desc=Path(output_file).name
+                ) as bar:
+                    for chunk in resp.iter_content(chunk_size=1024):
+                        if chunk:
+                            f.write(chunk)
+                            bar.update(len(chunk))
+            _logger.info(f"Downloaded {output_file} via Python requests")
+        except Exception as e:
+            _logger.error(f"Failed to download {url}: {e}")
+            raise
 
 
 class Config:
-    def __init__(self):
-        self.REPO_BASE_URL = "https://dl.fedoraproject.org/pub/epel/9/Everything/x86_64/"
-        self.REPOMD_XML = "repodata/repomd.xml"
-        self.LOCAL_REPOMD_FILE = "repomd.xml"
-        self.LOCAL_XZ_FILE = "primary.xml.xz"
-        self.LOCAL_XML_FILE = "primary.xml"
-        self.PACKAGE_COLUMNS = 4
-        self.PACKAGE_COLUMN_WIDTH = 30
-        self.DOWNLOAD_DIR = "rpms"
-        self.SUPPORT_WEAK_DEPS = False
-        self.ONLY_LATEST_VERSION = True
-        self.DOWNLOADER = "powershell"
+    def __init__(self) -> None:
 
-    def update_from_dict(self, data):
+        self.REPO_BASE_URL: str = "https://dl.fedoraproject.org/pub/epel/9/Everything/x86_64/"
+        self.REPOMD_XML: str = "repodata/repomd.xml"
+        self.LOCAL_REPOMD_FILE: Path = Path("repomd.xml")
+        self.LOCAL_XZ_FILE: Path = Path("primary.xml.xz")
+        self.LOCAL_XML_FILE: Path = Path("primary.xml")
+        self.PACKAGE_COLUMNS: int = 4
+        self.PACKAGE_COLUMN_WIDTH: int = 30
+        self.DOWNLOAD_DIR: Path = Path("rpms")
+        self.SKIP_SSL_VERIFY: bool = True
+        self.SUPPORT_WEAK_DEPS: bool = False
+        self.ONLY_LATEST_VERSION: bool = True
+        self.DOWNLOADER: str = "powershell"
+
+    def update_from_dict(self, data: dict) -> None:
         for key, value in data.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
+            key_upper = key.upper()
+            if hasattr(self, key_upper):
+                setattr(self, key_upper, value if not isinstance(
+                    getattr(self, key_upper), Path) else Path(value))
 
-    def to_dict(self):
-        return {k: getattr(self, k) for k in dir(self) if k.isupper()}
+    def to_dict(self) -> dict:
+        return {
+            k: (str(getattr(self, k)) if isinstance(
+                getattr(self, k), Path) else getattr(self, k))
+            for k in dir(self) if k.isupper()
+        }
 
 
 class MetadataManager:
-    def __init__(self, config: Config, downloader: Downloader):
+    NS_REPO = {"repo": "http://linux.duke.edu/metadata/repo"}
+    NS_COMMON = {
+        "common": "http://linux.duke.edu/metadata/common",
+        "rpm": "http://linux.duke.edu/metadata/rpm"
+    }
+
+    def __init__(self, config: Config, downloader: Downloader) -> None:
         self.config = config
         self.downloader = downloader
-        self.all_packages = []
-        self.requires_map = {}
-        self.provides_map = defaultdict(set)
-        self.dep_map = {}
-        self.primary_root = None
-        self.metadata_loaded = False
+        self.all_packages: List[str] = []
+        self.requires_map: Dict[str, Set[str]] = {}
+        self.provides_map: Dict[str, Set[str]] = defaultdict(set)
+        self.dep_map: Dict[str, Set[str]] = {}
+        self.primary_root: Optional[ET.Element] = None
+        self.metadata_loaded: bool = False
+        self.repomd_root: Optional[ET.Element] = None
 
-    def check_and_refresh_metadata(self, force_refresh=False):
-        required_files = [self.config.LOCAL_REPOMD_FILE,
-                          self.config.LOCAL_XZ_FILE, self.config.LOCAL_XML_FILE]
-        missing = [f for f in required_files if not os.path.exists(f)]
-
+    def check_and_refresh_metadata(self, force_refresh: bool = False) -> None:
+        required_files = [
+            self.config.LOCAL_REPOMD_FILE,
+            self.config.LOCAL_XZ_FILE,
+            self.config.LOCAL_XML_FILE
+        ]
+        missing = [str(f) for f in required_files if not f.exists()]
         if missing or force_refresh:
-            print(
-                f"{Colors.FG_YELLOW}Missing or refresh forced for metadata files: {', '.join(missing)}{Colors.RESET}")
-            print(f"{Colors.FG_CYAN}Refreshing metadata...{Colors.RESET}")
+            _logger.warning(
+                f"Missing or refresh forced for metadata files: {', '.join(missing)}")
+            _logger.info("Refreshing metadata...")
 
             repomd_url = urljoin(self.config.REPO_BASE_URL,
                                  self.config.REPOMD_XML)
             self.downloader.download(repomd_url, self.config.LOCAL_REPOMD_FILE)
 
-            repomd_root = self._parse_xml(self.config.LOCAL_REPOMD_FILE)
-            if repomd_root is None:
+            self.repomd_root = self._parse_xml(self.config.LOCAL_REPOMD_FILE)
+            if self.repomd_root is None:
                 raise RuntimeError("Failed to parse repomd.xml")
 
-            primary_url = self._get_primary_location_url(repomd_root)
+            primary_url = self._get_primary_location_url(self.repomd_root)
             if not primary_url:
                 raise RuntimeError("Primary URL not found in repomd.xml")
 
             self.downloader.download(primary_url, self.config.LOCAL_XZ_FILE)
             self._decompress_file(self.config.LOCAL_XZ_FILE,
                                   self.config.LOCAL_XML_FILE)
+
             self._reset_metadata_state()
+            self.primary_root = self._parse_xml(self.config.LOCAL_XML_FILE)
+            if self.primary_root is None:
+                raise RuntimeError("Failed to parse primary.xml")
             self._load_metadata_maps()
             self.metadata_loaded = True
-            self.primary_root = self._parse_xml(self.config.LOCAL_XML_FILE)
         else:
-            print(
-                f"{Colors.FG_GREEN}All metadata files present, skipping refresh.{Colors.RESET}")
+            _logger.info("All metadata files present, skipping refresh.")
             if not self.metadata_loaded:
                 self.primary_root = self._parse_xml(self.config.LOCAL_XML_FILE)
                 if self.primary_root is None:
@@ -161,54 +226,55 @@ class MetadataManager:
                 self._load_metadata_maps()
                 self.metadata_loaded = True
 
-    def cleanup_files(self):
-        files = [self.config.LOCAL_REPOMD_FILE,
-                 self.config.LOCAL_XZ_FILE, self.config.LOCAL_XML_FILE]
+    def cleanup_files(self) -> None:
+        files = [
+            self.config.LOCAL_REPOMD_FILE,
+            self.config.LOCAL_XZ_FILE,
+            self.config.LOCAL_XML_FILE,
+        ]
         deleted_any = False
         for f in files:
-            if os.path.exists(f):
-                try:
-                    os.remove(f)
-                    print(f"{Colors.FG_GREEN}Removed {f}{Colors.RESET}")
+            try:
+                if f.exists():
+                    f.unlink()
+                    _logger.info(f"Removed {f}")
                     deleted_any = True
-                except Exception as e:
-                    print(f"{Colors.FG_RED}Failed to remove {f}: {e}{Colors.RESET}")
+            except Exception as e:
+                _logger.error(f"Failed to remove {f}: {e}")
         if not deleted_any:
-            print(f"{Colors.FG_YELLOW}No metadata files to remove.{Colors.RESET}")
+            _logger.warning("No metadata files to remove.")
         self._reset_metadata_state()
         self.primary_root = None
         self.metadata_loaded = False
 
-    def _reset_metadata_state(self):
+    def _reset_metadata_state(self) -> None:
         self.all_packages.clear()
         self.requires_map.clear()
         self.provides_map.clear()
         self.dep_map.clear()
 
-    def _parse_xml(self, path):
-        print(f"{Colors.FG_CYAN}Parsing XML file {path}{Colors.RESET}")
+    def _parse_xml(self, path: Path) -> Optional[ET.Element]:
+        _logger.info(f"Parsing XML file {path}")
         try:
-            return ET.parse(path).getroot()
+            return ET.parse(str(path)).getroot()
         except ET.ParseError as e:
-            print(f"{Colors.FG_RED}Failed to parse XML {path}: {e}{Colors.RESET}")
+            _logger.error(f"Failed to parse XML {path}: {e}")
             return None
 
-    def _get_primary_location_url(self, repomd_root):
-        ns = {"repo": "http://linux.duke.edu/metadata/repo"}
-        for data in repomd_root.findall("repo:data", ns):
+    def _get_primary_location_url(self, repomd_root: ET.Element) -> Optional[str]:
+        for data in repomd_root.findall("repo:data", MetadataManager.NS_REPO):
             if data.attrib.get("type") == "primary":
-                location = data.find("repo:location", ns)
+                location = data.find("repo:location", MetadataManager.NS_REPO)
                 if location is not None:
                     href = location.attrib.get("href")
                     if href:
                         return href if href.startswith("http") else urljoin(self.config.REPO_BASE_URL, href)
         return None
 
-    def _decompress_file(self, input_path, output_path):
-        print(
-            f"{Colors.FG_CYAN}Decompressing {input_path} to {output_path}...{Colors.RESET}")
+    def _decompress_file(self, input_path: Path, output_path: Path) -> None:
+        _logger.info(f"Decompressing {input_path} to {output_path}...")
         try:
-            file_type = magic.from_file(input_path)
+            file_type = magic.from_file(str(input_path))
             if "XZ compressed" in file_type:
                 opener = lzma.open
             elif "gzip compressed" in file_type:
@@ -218,24 +284,25 @@ class MetadataManager:
             else:
                 raise RuntimeError(
                     f"Unsupported compression format: {file_type}")
-            with opener(input_path, 'rb') as f_in, open(output_path, 'wb') as f_out:
+
+            with opener(str(input_path), 'rb') as f_in, open(output_path, 'wb') as f_out:
                 f_out.write(f_in.read())
-            print(f"{Colors.FG_GREEN}Decompression complete.{Colors.RESET}")
+            _logger.info("Decompression complete.")
         except Exception as e:
-            print(f"{Colors.FG_RED}Failed to decompress: {e}{Colors.RESET}")
+            _logger.error(f"Failed to decompress: {e}")
             raise
 
-    def _load_metadata_maps(self):
+    def _load_metadata_maps(self) -> None:
         if self.primary_root is None:
             self.primary_root = self._parse_xml(self.config.LOCAL_XML_FILE)
-        if self.primary_root is None:
-            raise RuntimeError("Failed to load primary XML metadata")
+            if self.primary_root is None:
+                raise RuntimeError("Failed to load primary XML metadata")
 
-        ns = {"common": "http://linux.duke.edu/metadata/common",
-              "rpm": "http://linux.duke.edu/metadata/rpm"}
+        ns = MetadataManager.NS_COMMON
 
         self.all_packages = sorted(
-            pkg.find("common:name", ns).text for pkg in self.primary_root.findall("common:package", ns)
+            pkg.find("common:name", ns).text
+            for pkg in self.primary_root.findall("common:package", ns)
             if pkg.find("common:name", ns) is not None
         )
 
@@ -262,8 +329,11 @@ class MetadataManager:
 
         for pkg_name, fmt in pkgs_with_format:
             req = fmt.find("rpm:requires", ns)
-            req_set = {entry.get("name") for entry in req.findall(
-                "rpm:entry", ns)} if req is not None else set()
+            req_set = {
+                entry.get("name")
+                for entry in req.findall("rpm:entry", ns)
+            } if req is not None else set()
+
             if self.config.SUPPORT_WEAK_DEPS:
                 weak = fmt.find("rpm:weakrequires", ns)
                 if weak is not None:
@@ -277,44 +347,46 @@ class MetadataManager:
             for pkg, reqs in self.requires_map.items()
         }
 
-    def filter_packages(self, patterns):
+    def filter_packages(self, patterns: List[str]) -> List[str]:
         patterns = [p.strip() for p in patterns if p.strip()]
-        filtered = set()
-        for pkg in self.all_packages:
-            if any(fnmatch.fnmatch(pkg, pat) for pat in patterns):
-                filtered.add(pkg)
-        return sorted(filtered)
+        return sorted(
+            pkg for pkg in self.all_packages
+            if any(fnmatch.fnmatch(pkg, pat) for pat in patterns)
+        )
 
-    def resolve_all_dependencies(self, pkg_name):
+    @functools.lru_cache(maxsize=None)
+    def resolve_all_dependencies(self, pkg_name: str) -> Optional[Set[str]]:
         if pkg_name not in self.dep_map:
             return None
-        to_install = set()
+        to_install: Set[str] = set()
         queue = deque([pkg_name])
         while queue:
             current = queue.popleft()
             if current in to_install:
                 continue
             to_install.add(current)
-            queue.extend(dep for dep in self.dep_map.get(
-                current, set()) if dep not in to_install)
+            for dep in self.dep_map.get(current, set()):
+                if dep not in to_install:
+                    queue.append(dep)
         return to_install
 
 
-def print_packages_tabular(packages, columns=4, column_width=30):
+def print_packages_tabular(packages: List[str], columns: int = 4, column_width: int = 30) -> None:
     if not packages:
-        print(f"{Colors.FG_RED}No packages found.{Colors.RESET}")
+        _logger.error("No packages found.")
         return
-    for i, pkg in enumerate(packages, start=1):
-        print(f"{Colors.FG_MAGENTA}{pkg:<{column_width}}{Colors.RESET}", end='')
+    for i, pkg in enumerate(packages, 1):
+        print(f"{LogColors.MAGENTA}{pkg:<{column_width}}{LogColors.RESET}", end='')
         if i % columns == 0:
             print()
     if len(packages) % columns != 0:
         print()
 
 
-def get_package_rpm_urls(root, base_url, package_names, only_latest=True):
-    ns = {"common": "http://linux.duke.edu/metadata/common"}
-    packages_by_name = defaultdict(list)
+def get_package_rpm_urls(root: ET.Element, base_url: str, package_names: List[str], only_latest: bool = True) -> List[Tuple[str, str]]:
+    ns = MetadataManager.NS_COMMON
+    packages_by_name: Dict[str,
+                           List[Dict[str, Union[str, int]]]] = defaultdict(list)
 
     for pkg in root.findall("common:package", ns):
         name_elem = pkg.find("common:name", ns)
@@ -323,7 +395,6 @@ def get_package_rpm_urls(root, base_url, package_names, only_latest=True):
 
         version = pkg.find("common:version", ns)
         location = pkg.find("common:location", ns)
-
         if version is None or location is None:
             continue
 
@@ -331,21 +402,25 @@ def get_package_rpm_urls(root, base_url, package_names, only_latest=True):
         if not href:
             continue
 
-        packages_by_name[name_elem.text].append({
-            "ver": version.attrib.get("ver"),
-            "rel": version.attrib.get("rel"),
-            "epoch": int(version.attrib.get("epoch", "0")),
-            "href": href,
-            "name": name_elem.text,
-        })
+        try:
+            packages_by_name[name_elem.text].append({
+                "ver": version.attrib.get("ver", ""),
+                "rel": version.attrib.get("rel", ""),
+                "epoch": int(version.attrib.get("epoch", "0")),
+                "href": href,
+                "name": name_elem.text,
+            })
+        except Exception as e:
+            _logger.warning(
+                f"Skipping package {name_elem.text} due to version parsing error: {e}")
 
-    rpm_urls = []
+    rpm_urls: List[Tuple[str, str]] = []
+
     for pkg in package_names:
         entries = packages_by_name.get(pkg, [])
         if only_latest:
-
             latest = max(entries, key=lambda e: (
-                e["epoch"], e["ver"] or "", e["rel"] or ""), default=None)
+                e["epoch"], e["ver"], e["rel"]), default=None)
             if latest:
                 rpm_urls.append((pkg, urljoin(base_url, latest["href"])))
         else:
@@ -355,120 +430,114 @@ def get_package_rpm_urls(root, base_url, package_names, only_latest=True):
     return rpm_urls
 
 
-def download_packages(package_names, dep_map, primary_root, config: Config, downloader: Downloader, download_deps=False):
-    os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
+def download_packages(
+    package_names: List[str],
+    dep_map: Dict[str, Set[str]],
+    primary_root: ET.Element,
+    config: Config,
+    downloader: Downloader,
+    download_deps: bool = False
+) -> None:
+    config.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     packages_to_download = set(package_names)
+
     if download_deps:
         for pkg in package_names:
-            deps = resolve_all_dependencies(pkg, dep_map)
-            if deps:
-                packages_to_download.update(deps)
+            if pkg in dep_map:
+                packages_to_download.update(dep_map[pkg])
 
-    tqdm.write(
-        f"{Colors.FG_CYAN}Downloading packages: {', '.join(sorted(packages_to_download))}{Colors.RESET}")
+    _logger.info(
+        f"Downloading packages: {', '.join(sorted(packages_to_download))}")
 
-    rpm_urls = []
+    rpm_urls: List[Tuple[str, str]] = []
     for pkg in packages_to_download:
-        urls = get_package_rpm_urls(primary_root, config.REPO_BASE_URL, [
-            pkg], only_latest=config.ONLY_LATEST_VERSION)
+        urls = get_package_rpm_urls(
+            primary_root, config.REPO_BASE_URL, [
+                pkg], only_latest=config.ONLY_LATEST_VERSION
+        )
         if not urls:
-            tqdm.write(
-                f"{Colors.FG_RED}No RPM URLs found for {pkg}{Colors.RESET}")
+            _logger.warning(f"No RPM URLs found for {pkg}")
             continue
         rpm_urls.extend(urls)
 
     with tqdm(total=len(rpm_urls), desc="Downloading packages", unit="pkg") as bar:
         for _, url in rpm_urls:
-            dest_file = os.path.join(
-                config.DOWNLOAD_DIR, os.path.basename(url))
-            if os.path.exists(dest_file):
+            dest_file = config.DOWNLOAD_DIR / Path(url).name
+            if dest_file.exists():
                 tqdm.write(
-                    f"{Colors.FG_YELLOW}Already downloaded: {os.path.basename(url)}{Colors.RESET}")
+                    f"{LogColors.YELLOW}Already downloaded: {dest_file.name}{LogColors.RESET}")
                 bar.update(1)
                 continue
             try:
                 downloader.download(url, dest_file)
                 tqdm.write(
-                    f"{Colors.FG_GREEN}Downloaded: {os.path.basename(url)}{Colors.RESET}")
+                    f"{LogColors.GREEN}Downloaded: {dest_file.name}{LogColors.RESET}")
             except Exception as e:
                 tqdm.write(
-                    f"{Colors.FG_RED}Failed to download {os.path.basename(url)}: {e}{Colors.RESET}")
+                    f"{LogColors.RED}Failed to download {dest_file.name}: {e}{LogColors.RESET}")
             bar.update(1)
 
 
-def resolve_all_dependencies(pkg_name, dep_map):
-    if pkg_name not in dep_map:
-        return None
-    to_install = set()
-    queue = deque([pkg_name])
-    while queue:
-        current = queue.popleft()
-        if current in to_install:
-            continue
-        to_install.add(current)
-        for dep in dep_map.get(current, set()):
-            if dep not in to_install:
-                queue.append(dep)
-    return to_install
-
-
-def load_config_file(config_path, config: Config):
-    if not os.path.exists(config_path):
-        print(
-            f"{Colors.FG_YELLOW}Config file '{config_path}' not found, using defaults.{Colors.RESET}")
+def load_config_file(config_path: Path, config: Config) -> None:
+    if not config_path.exists():
+        _logger.warning(
+            f"Config file '{config_path}' not found, using defaults.")
         return
     try:
         with open(config_path, 'r') as f:
             data = yaml.safe_load(f)
         if data:
             config.update_from_dict(data)
-            print(f"{Colors.FG_GREEN}Loaded config from {config_path}{Colors.RESET}")
+            _logger.info(f"Loaded config from {config_path}")
         else:
-            print(
-                f"{Colors.FG_YELLOW}Config file {config_path} is empty, using defaults.{Colors.RESET}")
+            _logger.warning(
+                f"Config file {config_path} is empty, using defaults.")
     except Exception as e:
-        print(f"{Colors.FG_RED}Failed to load config {config_path}: {e}{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}Continuing with default configuration.{Colors.RESET}")
+        _logger.error(f"Failed to load config {config_path}: {e}")
+        _logger.warning("Continuing with default configuration.")
 
 
-def write_default_config(config_path, config: Config):
+def write_default_config(config_path: Path, config: Config) -> None:
     default_data = config.to_dict()
     try:
         with open(config_path, 'w') as f:
             yaml.safe_dump(default_data, f, sort_keys=False)
-        print(f"{Colors.FG_GREEN}Default config written to {config_path}{Colors.RESET}")
+        _logger.info(f"Default config written to {config_path}")
     except Exception as e:
-        print(f"{Colors.FG_RED}Failed to write default config: {e}{Colors.RESET}")
+        _logger.error(f"Failed to write default config: {e}")
 
 
-def print_config(config: Config):
+def print_config(config: Config) -> None:
     print(
-        f"\n{Colors.BOLD}{Colors.FG_CYAN}--- Current Configuration ---{Colors.RESET}")
+        f"\n{LogColors.BOLD}{LogColors.CYAN}--- Current Configuration ---{LogColors.RESET}")
     for key in sorted(k for k in dir(config) if k.isupper()):
-        print(f"{Colors.FG_YELLOW}{key:20}{Colors.RESET} = {Colors.FG_GREEN}{getattr(config, key)}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.FG_CYAN}-----------------------------{Colors.RESET}\n")
+        val = getattr(config, key)
+        print(
+            f"{LogColors.YELLOW}{key:20}{LogColors.RESET} = {LogColors.GREEN}{val}{LogColors.RESET}")
+    print(f"{LogColors.BOLD}{LogColors.CYAN}-----------------------------{LogColors.RESET}\n")
 
 
-def edit_configuration(config: Config, config_path=None):
+def edit_configuration(config: Config, config_path: Optional[Path] = None) -> None:
     keys = sorted(k for k in dir(config) if k.isupper())
     key_map = {str(i + 1): k for i, k in enumerate(keys)}
 
     while True:
         print_config(config)
         print(
-            f"{Colors.FG_YELLOW}Select config key by number (Enter to exit):{Colors.RESET}")
-        for i, key in enumerate(keys, 1):
-            print(f"  {Colors.FG_CYAN}{i}{Colors.RESET}) {key}")
-        choice = input(f"{Colors.FG_CYAN}Your choice: {Colors.RESET}").strip()
+            f"{LogColors.YELLOW}Select config key by number (Enter to exit):{LogColors.RESET}")
+        for num, key in key_map.items():
+            print(f"  {LogColors.CYAN}{num}{LogColors.RESET}) {key}")
+        choice = input(
+            f"{LogColors.CYAN}Your choice: {LogColors.RESET}").strip()
         if not choice:
             break
         if choice not in key_map:
-            print(f"{Colors.FG_RED}Invalid choice.{Colors.RESET}")
+            print(f"{LogColors.RED}Invalid choice.{LogColors.RESET}")
             continue
         key = key_map[choice]
         current_val = getattr(config, key)
         new_val = input(
-            f"{Colors.FG_CYAN}Enter new value for {key} (current: {current_val}): {Colors.RESET}").strip()
+            f"{LogColors.CYAN}Enter new value for {key} (current: {current_val}): {LogColors.RESET}").strip()
         try:
             if isinstance(current_val, bool):
                 new_val_lower = new_val.lower()
@@ -477,36 +546,38 @@ def edit_configuration(config: Config, config_path=None):
                 elif new_val_lower in {"false", "0", "no", "n"}:
                     new_val = False
                 else:
-                    print(f"{Colors.FG_RED}Invalid boolean value.{Colors.RESET}")
+                    print(f"{LogColors.RED}Invalid boolean value.{LogColors.RESET}")
                     continue
             elif isinstance(current_val, int):
                 new_val = int(new_val)
+            elif isinstance(current_val, Path):
+                new_val = Path(new_val)
         except ValueError:
-            print(f"{Colors.FG_RED}Invalid value type.{Colors.RESET}")
+            print(f"{LogColors.RED}Invalid value type.{LogColors.RESET}")
             continue
         setattr(config, key, new_val)
-        print(f"{Colors.FG_GREEN}Updated {key} to {new_val}.{Colors.RESET}")
+        print(f"{LogColors.GREEN}Updated {key} to {new_val}.{LogColors.RESET}")
 
     if config_path:
         save_choice = input(
-            f"{Colors.FG_YELLOW}Save changes to config file '{config_path}'? (y/N): {Colors.RESET}").strip().lower()
+            f"{LogColors.YELLOW}Save changes to config file '{config_path}'? (y/N): {LogColors.RESET}").strip().lower()
         if save_choice in ("y", "yes"):
             write_default_config(config_path, config)
-            print(f"{Colors.FG_GREEN}Configuration saved.{Colors.RESET}")
+            print(f"{LogColors.GREEN}Configuration saved.{LogColors.RESET}")
         else:
-            print(f"{Colors.FG_YELLOW}Changes not saved.{Colors.RESET}")
+            print(f"{LogColors.YELLOW}Changes not saved.{LogColors.RESET}")
 
 
-def prompt_package_selection(metadata: MetadataManager):
+def prompt_package_selection(metadata: MetadataManager) -> List[str]:
     filters = input(
-        f"{Colors.FG_CYAN}Enter package names/wildcards (comma-separated): {Colors.RESET}").strip()
+        f"{LogColors.CYAN}Enter package names/wildcards (comma-separated): {LogColors.RESET}").strip()
     patterns = [p.strip() for p in filters.split(',') if p.strip()]
     selected = metadata.filter_packages(patterns)
     if not selected:
-        print(f"{Colors.FG_RED}No packages matched.{Colors.RESET}")
+        _logger.error("No packages matched.")
         return []
     include_deps = input(
-        f"{Colors.FG_CYAN}Include dependencies? (y/N): {Colors.RESET}").strip().lower() in {'y', 'yes', '1', 'true'}
+        f"{LogColors.CYAN}Include dependencies? (y/N): {LogColors.RESET}").strip().lower() in {'y', 'yes', '1', 'true'}
     all_pkgs = set(selected)
     if include_deps:
         for pkg in selected:
@@ -516,69 +587,68 @@ def prompt_package_selection(metadata: MetadataManager):
     return sorted(all_pkgs)
 
 
-def list_packages(metadata: MetadataManager, *_):
-
-    patterns = input(
-        f"{Colors.FG_CYAN}Enter wildcard filters (comma-separated): {Colors.RESET}").strip().split(",")
+def list_packages(metadata: MetadataManager, *_) -> None:
+    patterns_input = input(
+        f"{LogColors.CYAN}Enter wildcard filters (comma-separated): {LogColors.RESET}").strip()
+    patterns = [p.strip() for p in patterns_input.split(",") if p.strip()]
     packages = metadata.filter_packages(patterns)
     print_packages_tabular(
         packages, metadata.config.PACKAGE_COLUMNS, metadata.config.PACKAGE_COLUMN_WIDTH)
 
 
-def calc_dependencies(metadata: MetadataManager, *_):
-    pkg = input(f"{Colors.FG_CYAN}Enter package name: {Colors.RESET}").strip()
-    if not pkg or pkg not in metadata.dep_map:
-        print(f"{Colors.FG_RED}Package not found.{Colors.RESET}")
+def calc_dependencies(metadata: MetadataManager, package_name: Optional[str] = None, *_) -> None:
+    if package_name is None:
+        package_name = input(
+            f"{LogColors.CYAN}Enter package name: {LogColors.RESET}").strip()
+    if not package_name or package_name not in metadata.dep_map:
+        _logger.error("Package not found.")
         return
-    deps = metadata.resolve_all_dependencies(pkg)
+    deps = metadata.resolve_all_dependencies(package_name)
     if not deps:
-        print(f"{Colors.FG_RED}Cannot resolve dependencies.{Colors.RESET}")
+        _logger.error("Cannot resolve dependencies.")
         return
-    print(f"{Colors.FG_GREEN}Dependencies for {pkg}:{Colors.RESET}")
+    _logger.info(f"Dependencies for {package_name}:")
     print_packages_tabular(sorted(
         deps), metadata.config.PACKAGE_COLUMNS, metadata.config.PACKAGE_COLUMN_WIDTH)
 
 
-def refresh_metadata(metadata: MetadataManager, *_):
+def refresh_metadata(metadata: MetadataManager, *_) -> None:
     metadata.check_and_refresh_metadata(force_refresh=True)
 
 
-def cleanup_metadata(metadata: MetadataManager, *_):
+def cleanup_metadata(metadata: MetadataManager, *_) -> None:
     metadata.cleanup_files()
 
 
-def list_rpm_urls(metadata: MetadataManager, primary_root=None):
+def list_rpm_urls(metadata: MetadataManager, primary_root: Optional[ET.Element] = None) -> None:
     if primary_root is None:
-
         primary_root = metadata.primary_root
-        if primary_root is None:
-            print(
-                f"{Colors.FG_RED}Primary metadata XML not loaded. Refresh metadata first.{Colors.RESET}")
-            return
+    if primary_root is None:
+        _logger.error(
+            "Primary metadata XML not loaded. Refresh metadata first.")
+        return
 
     selected = prompt_package_selection(metadata)
     if not selected:
         return
 
-    urls = get_package_rpm_urls(
-        primary_root, metadata.config.REPO_BASE_URL,
-        selected, only_latest=metadata.config.ONLY_LATEST_VERSION
-    )
+    urls = get_package_rpm_urls(primary_root, metadata.config.REPO_BASE_URL,
+                                selected, only_latest=metadata.config.ONLY_LATEST_VERSION)
     if not urls:
-        print(f"{Colors.FG_RED}No RPM URLs found.{Colors.RESET}")
+        _logger.error("No RPM URLs found.")
         return
 
     for pkg, url in urls:
-        print(f"{Colors.FG_MAGENTA}{pkg:<30}{Colors.FG_CYAN}{url}{Colors.RESET}")
+        print(f"{LogColors.MAGENTA}{pkg:<30}{LogColors.CYAN}{url}{LogColors.RESET}")
 
 
-def download_packages_ui(metadata: MetadataManager, primary_root=None):
+def download_packages_ui(metadata: MetadataManager, primary_root: Optional[ET.Element] = None) -> None:
     if primary_root is None:
         primary_root = metadata.primary_root
-        if primary_root is None:
-            print(
-                f"{Colors.FG_RED}Primary metadata XML not loaded. Refresh metadata first.{Colors.RESET}")
-            return
+    if primary_root is None:
+        _logger.error(
+            "Primary metadata XML not loaded. Refresh metadata first.")
+        return
 
     selected = prompt_package_selection(metadata)
     if not selected:
@@ -588,12 +658,12 @@ def download_packages_ui(metadata: MetadataManager, primary_root=None):
                       metadata.config, metadata.downloader, download_deps=False)
 
 
-def configure_settings(metadata: MetadataManager, _, config_path=None):
+def configure_settings(metadata: MetadataManager, _, config_path: Optional[Path] = None) -> None:
     edit_configuration(metadata.config, config_path)
 
 
-def exit_program(*_):
-    print(f"{Colors.FG_GREEN}Goodbye!{Colors.RESET}")
+def exit_program(*_) -> None:
+    _logger.info("Goodbye!")
     sys.exit(0)
 
 
@@ -609,23 +679,22 @@ MENU_ACTIONS = {
 }
 
 
-def run_interactive_menu(metadata: MetadataManager, config_path):
-
+def run_interactive_menu(metadata: MetadataManager, config_path: Path) -> None:
     while True:
-        print(f"\n{Colors.BOLD}{Colors.FG_BLUE}--- MENU ---{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}1) List packages{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}2) Calculate dependencies{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}3) Refresh metadata files{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}4) Cleanup metadata files{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}5) List RPM URLs{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}6) Download packages{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}9) Configure settings{Colors.RESET}")
-        print(f"{Colors.FG_YELLOW}0) Exit{Colors.RESET}")
-        choice = input(f"{Colors.FG_CYAN}Your choice: {Colors.RESET}").strip()
+        print(f"\n{LogColors.BOLD}{LogColors.BLUE}--- MENU ---{LogColors.RESET}")
+        print(f"{LogColors.YELLOW}1) List packages{LogColors.RESET}")
+        print(f"{LogColors.YELLOW}2) Calculate dependencies{LogColors.RESET}")
+        print(f"{LogColors.YELLOW}3) Refresh metadata files{LogColors.RESET}")
+        print(f"{LogColors.YELLOW}4) Cleanup metadata files{LogColors.RESET}")
+        print(f"{LogColors.YELLOW}5) List RPM URLs{LogColors.RESET}")
+        print(f"{LogColors.YELLOW}6) Download packages{LogColors.RESET}")
+        print(f"{LogColors.YELLOW}9) Configure settings{LogColors.RESET}")
+        print(f"{LogColors.YELLOW}0) Exit{LogColors.RESET}")
+        choice = input(
+            f"{LogColors.CYAN}Your choice: {LogColors.RESET}").strip()
         action = MENU_ACTIONS.get(choice)
         if action:
             try:
-
                 if action == refresh_metadata:
                     action(metadata)
                 elif action == configure_settings:
@@ -635,16 +704,16 @@ def run_interactive_menu(metadata: MetadataManager, config_path):
                 else:
                     action(metadata, None)
             except Exception as e:
-                print(f"{Colors.FG_RED}Error during operation: {e}{Colors.RESET}")
+                _logger.error(f"Error during operation: {e}")
         else:
-            print(f"{Colors.FG_RED}Invalid choice.{Colors.RESET}")
+            _logger.error("Invalid choice.")
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Windows RPM Package Metadata Tool")
-    parser.add_argument('--config', '-c', default="config.yaml",
-                        help="YAML config file path")
+    parser.add_argument('--config', '-c', type=Path,
+                        default=Path("config.yaml"), help="YAML config file path")
     parser.add_argument('--write-default-config', action='store_true',
                         help="Write default config.yaml and exit")
     parser.add_argument('--list-packages', action='store_true',
@@ -666,7 +735,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     try:
         args = parse_args()
         config = Config()
@@ -676,7 +745,14 @@ def main():
             return
 
         load_config_file(args.config, config)
-        downloader = Downloader(config.DOWNLOADER)
+
+        if config.SKIP_SSL_VERIFY:
+            _logger.warning(
+                "SSL verification is disabled; insecure HTTPS requests will not be verified.")
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        downloader = Downloader(
+            config.DOWNLOADER, skip_ssl_verify=config.SKIP_SSL_VERIFY)
         metadata = MetadataManager(config, downloader)
 
         cli_actions_need_meta = any([
@@ -686,48 +762,47 @@ def main():
             args.list_rpm_urls,
             args.download,
         ])
+
         if cli_actions_need_meta:
             metadata.check_and_refresh_metadata()
-        else:
 
-            pass
-
-        primary_root = None
-        if cli_actions_need_meta:
-            primary_root = metadata.primary_root
+        primary_root = metadata.primary_root if cli_actions_need_meta else None
 
         if args.list_packages:
-
             list_packages(metadata)
+            return
         elif args.calc_deps:
             if args.calc_deps in metadata.dep_map:
-                calc_dependencies(metadata)
+                calc_dependencies(metadata, args.calc_deps)
             else:
-                print(
-                    f"{Colors.FG_RED}Package '{args.calc_deps}' not found.{Colors.RESET}")
+                _logger.error(f"Package '{args.calc_deps}' not found.")
+            return
         elif args.refresh_meta:
             refresh_metadata(metadata)
+            return
         elif args.cleanup_meta:
             cleanup_metadata(metadata)
+            return
 
         if args.list_rpm_urls:
             list_rpm_urls(metadata, primary_root)
+            return
         elif args.download:
             download_packages_ui(metadata, primary_root)
+            return
         elif args.configure:
             configure_settings(metadata, None, args.config)
+            return
         elif not args.no_interactive:
-
             if not metadata.metadata_loaded:
                 metadata.check_and_refresh_metadata()
             run_interactive_menu(metadata, args.config)
         else:
-            print(
-                f"{Colors.FG_YELLOW}No operation specified and interactive mode disabled.{Colors.RESET}")
+            _logger.warning(
+                "No operation specified and interactive mode disabled.")
 
     except KeyboardInterrupt:
-        print(
-            f"\n{Colors.FG_YELLOW}Terminated by user (Ctrl+C). Exiting...{Colors.RESET}")
+        _logger.warning("\nTerminated by user (Ctrl+C). Exiting...")
         sys.exit(0)
 
 
