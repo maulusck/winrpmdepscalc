@@ -369,23 +369,32 @@ def resolve_all_dependencies(pkg_name, dep_map):
 
 
 def configure_settings():
+    config_keys = [attr for attr in dir(Config) if attr.isupper()]
+    key_map = {str(i + 1): key for i, key in enumerate(config_keys)}
+
     while True:
         Config.print_config()
-        print(
-            f"{Colors.FG_YELLOW}Enter the config key to change (or press Enter to return to menu):{Colors.RESET}"
-        )
-        key = input(f"{Colors.FG_CYAN}Config key: {Colors.RESET}").strip()
-        if key == "":
+        print(f"{Colors.FG_YELLOW}Select the config key to change by number (or press Enter to return to menu):{Colors.RESET}")
+        for i, key in enumerate(config_keys, 1):
+            print(f"  {Colors.FG_CYAN}{i}{Colors.RESET}) {key}")
+
+        choice = input(
+            f"{Colors.FG_CYAN}Choice (number): {Colors.RESET}").strip()
+        if choice == "":
             break
-        if not hasattr(Config, key):
+
+        if choice not in key_map:
             print(
-                f"{Colors.FG_RED}Invalid key '{key}'. Please enter a valid config key.{Colors.RESET}"
-            )
+                f"{Colors.FG_RED}Invalid choice '{choice}'. Please enter a valid number.{Colors.RESET}")
             continue
+
+        key = key_map[choice]
         current_value = getattr(Config, key)
+
         new_value = input(
             f"{Colors.FG_CYAN}Enter new value for {key} (current: {current_value}): {Colors.RESET}"
         ).strip()
+
         if isinstance(current_value, bool):
             if new_value.lower() in ["true", "1", "yes", "y"]:
                 new_value = True
@@ -393,14 +402,15 @@ def configure_settings():
                 new_value = False
             else:
                 print(
-                    f"{Colors.FG_RED}Please enter a valid boolean (true/false).{Colors.RESET}"
-                )
+                    f"{Colors.FG_RED}Please enter a valid boolean (true/false).{Colors.RESET}")
                 continue
+
         elif isinstance(current_value, int):
             if not new_value.isdigit():
                 print(f"{Colors.FG_RED}Please enter a valid integer.{Colors.RESET}")
                 continue
             new_value = int(new_value)
+
         Config.set_config(key, new_value)
 
 
