@@ -12,7 +12,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Dict, Set, Tuple, Union
 from urllib.parse import urljoin
-from typing import Optional, List
 
 import magic
 import requests
@@ -75,18 +74,17 @@ class Downloader:
             raise ValueError(
                 f"Invalid downloader '{downloader_type}'. Allowed: {allowed}")
         self.downloader_type = DownloaderType(dt)
-        self.proxy_url = proxy_url
-        self.session = None
+
         if self.downloader_type == DownloaderType.PYTHON:
             self.session = requests.Session()
-            proxies = {}
             if proxy_url:
-                proxies = {"http": proxy_url, "https": proxy_url}
+                self.session.proxies = {"http": proxy_url, "https": proxy_url}
             else:
-                proxies = {k: v for k, v in requests.utils.get_environ_proxies(
-                    "").items() if k in ("http", "https")} or {}
-            self.session.proxies.update(proxies)
+
+                self.session.trust_env = True
             self.session.verify = not skip_ssl_verify
+        else:
+            self.session = None
 
     def download(self, url: str, output_file: Union[str, Path]) -> None:
         if self.downloader_type == DownloaderType.POWERSHELL:
@@ -95,6 +93,7 @@ class Downloader:
             self._download_python(url, output_file)
 
     def _download_powershell(self, url: str, output_file: Union[str, Path]) -> None:
+
         ps_script = (
             f"$wc = New-Object System.Net.WebClient; "
             f"$wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials; "
