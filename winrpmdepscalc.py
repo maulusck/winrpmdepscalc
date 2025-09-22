@@ -12,6 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Dict, Set, Tuple, Union
 from urllib.parse import urljoin
+from typing import Optional, List
 
 import magic
 import requests
@@ -368,6 +369,67 @@ class MetadataManager:
         return to_install
 
 
+def parse_package_names(package_names_str: Optional[str]) -> Optional[List[str]]:
+    """
+    Parses a comma-separated string of package names/wildcards into a list of patterns.
+    Returns None if the input is empty or None.
+    """
+    if not package_names_str:
+        return None
+    patterns = [p.strip() for p in package_names_str.split(",") if p.strip()]
+    return patterns if patterns else None
+
+
+def select_packages(metadata: MetadataManager, package_names_str: Optional[str], ask_include_deps: Optional[bool] = True) -> List[str]:
+    """
+    Unified package selection from comma-separated string or interactive prompt.
+
+    :param package_names_str: Optional comma-separated string of package names/wildcards.
+    :param ask_include_deps: In oneshot mode, whether to include dependencies or not.
+                             In interactive mode, ignored (always prompt).
+    :return: Sorted list of matching packages.
+    """
+
+    patterns = parse_package_names(package_names_str)
+    if patterns is not None:
+
+        selected = metadata.filter_packages(patterns)
+        if not selected:
+            _logger.error("No packages matched the provided patterns.")
+            return []
+        if ask_include_deps:
+
+            all_pkgs = set(selected)
+            for pkg in selected:
+                deps = metadata.resolve_all_dependencies(pkg)
+                if deps:
+                    all_pkgs.update(deps)
+            return sorted(all_pkgs)
+        else:
+            return sorted(selected)
+
+    filters = input(
+        f"{LogColors.CYAN}Enter package names/wildcards (comma-separated): {LogColors.RESET}").strip()
+    patterns = [p.strip() for p in filters.split(",") if p.strip()]
+    selected = metadata.filter_packages(patterns)
+    if not selected:
+        _logger.error("No packages matched.")
+        return []
+
+    include_deps_input = input(
+        f"{LogColors.CYAN}Include dependencies? (y/N): {LogColors.RESET}").strip().lower()
+    include_deps = include_deps_input in {'y', 'yes', '1', 'true'}
+    if include_deps:
+        all_pkgs = set(selected)
+        for pkg in selected:
+            deps = metadata.resolve_all_dependencies(pkg)
+            if deps:
+                all_pkgs.update(deps)
+        return sorted(all_pkgs)
+
+    return sorted(selected)
+
+
 def print_packages_tabular(packages: List[str], columns: int = 4, column_width: int = 30) -> None:
     if not packages:
         _logger.error("No packages found.")
@@ -565,27 +627,6 @@ def edit_configuration(config: Config, config_path: Optional[Path] = None) -> No
             print(f"{LogColors.YELLOW}Changes not saved.{LogColors.RESET}")
 
 
-def prompt_package_selection(metadata: MetadataManager, ask_include_deps: bool = True) -> List[str]:
-    filters = input(
-        f"{LogColors.CYAN}Enter package names/wildcards (comma-separated): {LogColors.RESET}").strip()
-    patterns = [p.strip() for p in filters.split(',') if p.strip()]
-    selected = metadata.filter_packages(patterns)
-    if not selected:
-        _logger.error("No packages matched.")
-        return []
-    if ask_include_deps:
-        include_deps = input(
-            f"{LogColors.CYAN}Include dependencies? (y/N): {LogColors.RESET}").strip().lower() in {'y', 'yes', '1', 'true'}
-        if include_deps:
-            all_pkgs = set(selected)
-            for pkg in selected:
-                deps = metadata.resolve_all_dependencies(pkg)
-                if deps:
-                    all_pkgs.update(deps)
-            return sorted(all_pkgs)
-    return sorted(selected)
-
-
 def list_packages(metadata: MetadataManager, package_patterns: Optional[List[str]] = None) -> None:
     if not package_patterns:
         patterns_input = input(
@@ -597,8 +638,9 @@ def list_packages(metadata: MetadataManager, package_patterns: Optional[List[str
         packages, metadata.config.PACKAGE_COLUMNS, metadata.config.PACKAGE_COLUMN_WIDTH)
 
 
-def calc_dependencies(metadata: MetadataManager) -> None:
-    selected = prompt_package_selection(metadata, ask_include_deps=False)
+def calc_dependencies(metadata: MetadataManager, packages_str: Optional[str] = None, include_deps: Optional[bool] = False) -> None:
+    selected = select_packages(
+        metadata, packages_str, ask_include_deps=include_deps)
     if not selected:
         return
     for package_name in selected:
@@ -622,11 +664,9 @@ def cleanup_metadata(metadata: MetadataManager, *_) -> None:
     metadata.cleanup_files()
 
 
-def list_rpm_urls(metadata: MetadataManager, package_names: Optional[List[str]] = None) -> None:
-    if not package_names or len(package_names) == 0:
-        selected = prompt_package_selection(metadata)
-    else:
-        selected = package_names
+def list_rpm_urls(metadata: MetadataManager, packages_str: Optional[str] = None, include_deps: Optional[bool] = True) -> None:
+    selected = select_packages(
+        metadata, packages_str, ask_include_deps=include_deps)
     if not selected:
         return
     urls = get_package_rpm_urls(metadata.primary_root, metadata.config.REPO_BASE_URL,
@@ -638,15 +678,13 @@ def list_rpm_urls(metadata: MetadataManager, package_names: Optional[List[str]] 
         print(f"{LogColors.MAGENTA}{pkg:<30}{LogColors.CYAN}{url}{LogColors.RESET}")
 
 
-def download_packages_ui(metadata: MetadataManager, package_names: Optional[List[str]] = None) -> None:
-    if not package_names or len(package_names) == 0:
-        selected = prompt_package_selection(metadata)
-    else:
-        selected = package_names
+def download_packages_ui(metadata: MetadataManager, packages_str: Optional[str] = None, include_deps: Optional[bool] = True) -> None:
+    selected = select_packages(
+        metadata, packages_str, ask_include_deps=include_deps)
     if not selected:
         return
     download_packages(selected, metadata.dep_map, metadata.primary_root,
-                      metadata.config, metadata.downloader, download_deps=False)
+                      metadata.config, metadata.downloader, download_deps=include_deps)
 
 
 def configure_settings(metadata: MetadataManager, _, config_path: Optional[Path] = None) -> None:
@@ -723,6 +761,11 @@ def parse_args() -> argparse.Namespace:
                         help="Configure settings interactively")
     parser.add_argument('--no-interactive', action='store_true',
                         help="Disable interactive menu fallback")
+    parser.add_argument('--include-deps', dest='include_deps',
+                        action='store_true', help='Include dependencies (default: True)')
+    parser.add_argument('--no-include-deps', dest='include_deps',
+                        action='store_false', help='Do not include dependencies')
+    parser.set_defaults(include_deps=True)
     return parser.parse_args()
 
 
@@ -757,7 +800,8 @@ def main() -> None:
             return
 
         if args.calc_deps:
-            calc_dependencies(metadata)
+            calc_dependencies(metadata, packages_str=None,
+                              include_deps=args.include_deps)
             return
 
         if args.refresh_meta:
@@ -769,11 +813,13 @@ def main() -> None:
             return
 
         if args.list_rpm_urls:
-            list_rpm_urls(metadata)
+            list_rpm_urls(metadata, packages_str=None,
+                          include_deps=args.include_deps)
             return
 
         if args.download:
-            download_packages_ui(metadata)
+            download_packages_ui(metadata, packages_str=None,
+                                 include_deps=args.include_deps)
             return
 
         if args.configure:

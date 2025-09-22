@@ -2,5 +2,5 @@ requests
 requests-negotiate-sspi
 tqdm
 python-magic
-urllib3==1.26.20
+urllib3
 PyYAML
