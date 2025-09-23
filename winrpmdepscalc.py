@@ -52,7 +52,8 @@ _logger = logging.getLogger("rpm_downloader")
 _logger.setLevel(logging.DEBUG)
 ch = logging.StreamHandler()
 ch.setLevel(logging.DEBUG)
-ch.setFormatter(ColorFormatter("%(message)s"))
+formatter = ColorFormatter("%(message)s")
+ch.setFormatter(formatter)
 _logger.addHandler(ch)
 
 
@@ -66,9 +67,7 @@ class DownloaderType(Enum):
 
 
 class Downloader:
-    def __init__(
-        self, downloader_type: str = "powershell", proxy_url: Optional[str] = None, skip_ssl_verify: bool = True
-    ) -> None:
+    def __init__(self, downloader_type: str = "powershell", proxy_url: Optional[str] = None, skip_ssl_verify: bool = True) -> None:
         dt = downloader_type.lower()
         if not DownloaderType.has_value(dt):
             allowed = ', '.join(d.value for d in DownloaderType)
@@ -79,9 +78,9 @@ class Downloader:
         if self.downloader_type == DownloaderType.PYTHON:
             self.session = requests.Session()
             if proxy_url:
-                self.session.proxies.update(
-                    {"http": proxy_url, "https": proxy_url})
+                self.session.proxies = {"http": proxy_url, "https": proxy_url}
             else:
+
                 self.session.trust_env = True
             self.session.verify = not skip_ssl_verify
         else:
@@ -94,6 +93,7 @@ class Downloader:
             self._download_python(url, output_file)
 
     def _download_powershell(self, url: str, output_file: Union[str, Path]) -> None:
+
         ps_script = (
             f"$wc = New-Object System.Net.WebClient; "
             f"$wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials; "
@@ -101,12 +101,13 @@ class Downloader:
         )
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_script],
-            capture_output=True, text=True,
+            capture_output=True, text=True
         )
         if result.returncode != 0:
-            error_msg = result.stderr.strip()
-            _logger.error(f"PowerShell download failed:\n{error_msg}")
-            raise RuntimeError(f"PowerShell download failed:\n{error_msg}")
+            _logger.error(
+                f"PowerShell download failed:\n{result.stderr.strip()}")
+            raise RuntimeError(
+                f"PowerShell download failed:\n{result.stderr.strip()}")
         _logger.info(f"Downloaded {output_file} via PowerShell")
 
     def _download_python(self, url: str, output_file: Union[str, Path]) -> None:
@@ -131,6 +132,7 @@ class Downloader:
 
 class Config:
     def __init__(self) -> None:
+
         self.REPO_BASE_URL: str = "https://dl.fedoraproject.org/pub/epel/9/Everything/x86_64/"
         self.REPOMD_XML: str = "repodata/repomd.xml"
         self.LOCAL_REPOMD_FILE: Path = Path("repomd.xml")
@@ -148,10 +150,8 @@ class Config:
         for key, value in data.items():
             key_upper = key.upper()
             if hasattr(self, key_upper):
-                if isinstance(getattr(self, key_upper), Path):
-                    setattr(self, key_upper, Path(value))
-                else:
-                    setattr(self, key_upper, value)
+                setattr(self, key_upper, value if not isinstance(
+                    getattr(self, key_upper), Path) else Path(value))
 
     def to_dict(self) -> dict:
         return {
@@ -183,12 +183,12 @@ class MetadataManager:
         required_files = [
             self.config.LOCAL_REPOMD_FILE,
             self.config.LOCAL_XZ_FILE,
-            self.config.LOCAL_XML_FILE,
+            self.config.LOCAL_XML_FILE
         ]
         missing = [str(f) for f in required_files if not f.exists()]
         if missing or force_refresh:
             _logger.warning(
-                f"Missing or force refresh metadata files: {', '.join(missing)}")
+                f"Missing or refresh forced for metadata files: {', '.join(missing)}")
             _logger.info("Refreshing metadata...")
 
             repomd_url = urljoin(self.config.REPO_BASE_URL,
@@ -281,6 +281,7 @@ class MetadataManager:
             else:
                 raise RuntimeError(
                     f"Unsupported compression format: {file_type}")
+
             with opener(str(input_path), 'rb') as f_in, open(output_path, 'wb') as f_out:
                 f_out.write(f_in.read())
             _logger.info("Decompression complete.")
@@ -312,11 +313,9 @@ class MetadataManager:
                 continue
             pkg_name = name_elem.text
             fmt = pkg.find("common:format", ns)
-
             if fmt is None:
                 self.requires_map[pkg_name] = set()
                 continue
-
             prov = fmt.find("rpm:provides", ns)
             if prov is not None:
                 for entry in prov.findall("rpm:entry", ns):
@@ -327,12 +326,14 @@ class MetadataManager:
 
         for pkg_name, fmt in pkgs_with_format:
             req = fmt.find("rpm:requires", ns)
-            req_set = {entry.get("name") for entry in req.findall(
-                "rpm:entry", ns)} if req is not None else set()
+            req_set = {
+                entry.get("name")
+                for entry in req.findall("rpm:entry", ns)
+            } if req is not None else set()
 
             if self.config.SUPPORT_WEAK_DEPS:
                 weak = fmt.find("rpm:weakrequires", ns)
-                if weak:
+                if weak is not None:
                     req_set.update(entry.get("name")
                                    for entry in weak.findall("rpm:entry", ns))
             self.requires_map[pkg_name] = req_set
@@ -346,7 +347,8 @@ class MetadataManager:
     def filter_packages(self, patterns: List[str]) -> List[str]:
         patterns = [p.strip() for p in patterns if p.strip()]
         return sorted(
-            pkg for pkg in self.all_packages if any(fnmatch.fnmatch(pkg, pat) for pat in patterns)
+            pkg for pkg in self.all_packages
+            if any(fnmatch.fnmatch(pkg, pat) for pat in patterns)
         )
 
     @functools.lru_cache(maxsize=None)
@@ -360,28 +362,37 @@ class MetadataManager:
             if current in to_install:
                 continue
             to_install.add(current)
-            queue.extend(dep for dep in self.dep_map.get(
-                current, set()) if dep not in to_install)
+            for dep in self.dep_map.get(current, set()):
+                if dep not in to_install:
+                    queue.append(dep)
         return to_install
 
 
 def parse_package_names(package_names_str: Optional[str]) -> Optional[List[str]]:
-    """Parses comma-separated package names/wildcards into a list, returns None if empty."""
+    """
+    Parses a comma-separated string of package names/wildcards into a list of patterns.
+    Returns None if the input is empty or None.
+    """
     if not package_names_str:
         return None
     patterns = [p.strip() for p in package_names_str.split(",") if p.strip()]
-    return patterns or None
+    return patterns if patterns else None
 
 
-def select_packages(
-    metadata: MetadataManager,
-    package_names_str: Optional[str],
-    ask_include_deps: Optional[bool] = None,
-) -> List[str]:
-    """Select packages from input or prompt, optionally include dependencies."""
+def select_packages(metadata: MetadataManager, package_names_str: Optional[str], ask_include_deps: Optional[bool] = None) -> List[str]:
+    """
+    Unified package selection from comma-separated string or interactive prompt.
+
+    :param package_names_str: Optional comma-separated string of package names/wildcards.
+    :param ask_include_deps: If True/False, include or exclude dependencies without prompt.
+                             If None, ask interactively.
+    :return: Sorted list of matching packages.
+    """
+
     if not package_names_str:
         package_names_str = input(
             f"{LogColors.CYAN}Enter package names/wildcards (comma-separated): {LogColors.RESET}").strip()
+
     patterns = parse_package_names(package_names_str)
     if not patterns:
         _logger.error("No package names provided.")
@@ -418,13 +429,11 @@ def print_packages_tabular(packages: List[str], columns: int = 4, column_width: 
         print(f"{LogColors.MAGENTA}{pkg:<{column_width}}{LogColors.RESET}", end='')
         if i % columns == 0:
             print()
-    if len(packages) % columns:
+    if len(packages) % columns != 0:
         print()
 
 
-def get_package_rpm_urls(
-    root: ET.Element, base_url: str, package_names: List[str], only_latest: bool = True
-) -> List[Tuple[str, str]]:
+def get_package_rpm_urls(root: ET.Element, base_url: str, package_names: List[str], only_latest: bool = True) -> List[Tuple[str, str]]:
     ns = MetadataManager.NS_COMMON
     packages_by_name: Dict[str,
                            List[Dict[str, Union[str, int]]]] = defaultdict(list)
@@ -436,7 +445,7 @@ def get_package_rpm_urls(
 
         version = pkg.find("common:version", ns)
         location = pkg.find("common:location", ns)
-        if not version or not location:
+        if version is None or location is None:
             continue
 
         href = location.attrib.get("href")
@@ -456,6 +465,7 @@ def get_package_rpm_urls(
                 f"Skipping package {name_elem.text} due to version parsing error: {e}")
 
     rpm_urls: List[Tuple[str, str]] = []
+
     for pkg in package_names:
         entries = packages_by_name.get(pkg, [])
         if only_latest:
@@ -464,8 +474,8 @@ def get_package_rpm_urls(
             if latest:
                 rpm_urls.append((pkg, urljoin(base_url, latest["href"])))
         else:
-            rpm_urls.extend(
-                (pkg, urljoin(base_url, e["href"])) for e in entries)
+            for e in entries:
+                rpm_urls.append((pkg, urljoin(base_url, e["href"])))
 
     return rpm_urls
 
@@ -476,22 +486,25 @@ def download_packages(
     primary_root: ET.Element,
     config: Config,
     downloader: Downloader,
-    download_deps: bool = False,
+    download_deps: bool = False
 ) -> None:
     config.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     packages_to_download = set(package_names)
 
     if download_deps:
         for pkg in package_names:
-            packages_to_download.update(dep_map.get(pkg, ()))
+            if pkg in dep_map:
+                packages_to_download.update(dep_map[pkg])
 
     _logger.info(
         f"Downloading packages: {', '.join(sorted(packages_to_download))}")
 
     rpm_urls: List[Tuple[str, str]] = []
     for pkg in packages_to_download:
-        urls = get_package_rpm_urls(primary_root, config.REPO_BASE_URL, [
-                                    pkg], only_latest=config.ONLY_LATEST_VERSION)
+        urls = get_package_rpm_urls(
+            primary_root, config.REPO_BASE_URL, [
+                pkg], only_latest=config.ONLY_LATEST_VERSION
+        )
         if not urls:
             _logger.warning(f"No RPM URLs found for {pkg}")
             continue
@@ -522,7 +535,7 @@ def load_config_file(config_path: Path, config: Config) -> None:
         return
     try:
         with open(config_path, 'r') as f:
-            data = yaml.safe_load(f) or {}
+            data = yaml.safe_load(f)
         if data:
             config.update_from_dict(data)
             _logger.info(f"Loaded config from {config_path}")
@@ -535,9 +548,10 @@ def load_config_file(config_path: Path, config: Config) -> None:
 
 
 def write_default_config(config_path: Path, config: Config) -> None:
+    default_data = config.to_dict()
     try:
         with open(config_path, 'w') as f:
-            yaml.safe_dump(config.to_dict(), f, sort_keys=False)
+            yaml.safe_dump(default_data, f, sort_keys=False)
         _logger.info(f"Default config written to {config_path}")
     except Exception as e:
         _logger.error(f"Failed to write default config: {e}")
@@ -699,21 +713,20 @@ def run_interactive_menu(metadata: MetadataManager, config_path: Path) -> None:
         choice = input(
             f"{LogColors.CYAN}Your choice: {LogColors.RESET}").strip()
         action = MENU_ACTIONS.get(choice)
-        if not action:
+        if action:
+            try:
+                if action == refresh_metadata:
+                    action(metadata)
+                elif action == configure_settings:
+                    action(metadata, None, config_path)
+                elif action in (list_rpm_urls, download_packages_ui):
+                    action(metadata)
+                else:
+                    action(metadata, None)
+            except Exception as e:
+                _logger.error(f"Error during operation: {e}")
+        else:
             _logger.error("Invalid choice.")
-            continue
-
-        try:
-            if action in (refresh_metadata, cleanup_metadata):
-                action(metadata)
-            elif action == configure_settings:
-                action(metadata, None, config_path)
-            elif action in (list_rpm_urls, download_packages_ui, list_packages, calc_dependencies):
-                action(metadata)
-            else:
-                action(metadata, None)
-        except Exception as e:
-            _logger.error(f"Error during operation: {e}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -767,8 +780,8 @@ def main() -> None:
             config.DOWNLOADER, skip_ssl_verify=config.SKIP_SSL_VERIFY)
         metadata = MetadataManager(config, downloader)
 
-        needs_metadata = any([args.list_packages, args.calc_deps, args.refresh_meta,
-                             args.cleanup_meta, args.list_rpm_urls, args.download])
+        needs_metadata = any([args.list_packages, args.calc_deps is not None,
+                              args.refresh_meta, args.list_rpm_urls, args.download])
 
         if needs_metadata:
             metadata.check_and_refresh_metadata()
