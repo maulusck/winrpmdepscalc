@@ -756,7 +756,7 @@ def parse_args() -> argparse.Namespace:
                         action='store_true', help='Include dependencies (default: True)')
     parser.add_argument('--no-include-deps', dest='include_deps',
                         action='store_false', help='Do not include dependencies')
-    parser.set_defaults(include_deps=True)
+    parser.set_defaults(include_deps=None)
     return parser.parse_args()
 
 
