@@ -49,7 +49,7 @@ class ColorFormatter(logging.Formatter):
         return f"{color}{message}{LogColors.RESET}"
 
 
-_logger = logging.getLogger("rpm_downloader")
+_logger = logging.getLogger("winrpmdepscalc")
 _logger.setLevel(logging.DEBUG)
 ch = logging.StreamHandler()
 ch.setLevel(logging.DEBUG)
@@ -745,7 +745,7 @@ def run_interactive_menu(metadata: MetadataManager, config_path: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Windows RPM Package Metadata Tool")
+        description="Windows RPM Package Metadata Calculator Tool")
     parser.add_argument('-c', '--config', type=Path,
                         default=Path("config.yaml"), help="YAML config file path")
     parser.add_argument('--write-default-config', action='store_true',

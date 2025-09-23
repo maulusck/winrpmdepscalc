@@ -2,3 +2,5 @@
 *.xz
 *.gz
 *.rpm
+*.egg-info
+*__pycache__*
