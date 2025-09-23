@@ -1,6 +1,5 @@
 requests
-requests-negotiate-sspi
 tqdm
-python-magic
+python-magic-bin
 urllib3
 PyYAML
