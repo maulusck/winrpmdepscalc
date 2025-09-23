@@ -1,5 +1,0 @@
-requests
-tqdm
-python-magic-bin
-urllib3
-PyYAML
