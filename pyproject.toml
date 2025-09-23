@@ -7,7 +7,8 @@ name = "winrpmdepscalc"
 version = "1.0.0"
 description = "Windows RPM Package Metadata Calculator Tool"
 authors = [{ name = "Maulusck✖Perplexity", email = "maulusck@pm.me" }]
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 readme = "README.md"
 requires-python = ">=3.7"
 classifiers = [
