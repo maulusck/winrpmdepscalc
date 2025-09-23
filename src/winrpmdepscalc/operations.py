@@ -348,7 +348,6 @@ def run_interactive_menu(metadata: MetadataManager, config_path: Path) -> None:
             _logger.error("Invalid choice.")
 
 
-# MENU_ACTIONS is a dictionary of menu choices to functions; put it here to enable menu in run_interactive_menu
 MENU_ACTIONS = {
     "1": list_packages,
     "2": calc_dependencies,

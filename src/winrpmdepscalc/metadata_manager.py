@@ -136,7 +136,7 @@ class MetadataManager:
                 _logger.info(f"Decompression complete using {name}.")
                 return
             except Exception:
-                continue  # Try next decompressor
+                continue
 
         _logger.error("Unsupported or corrupted compression format.")
         raise RuntimeError("Unsupported or corrupted compression format.")
