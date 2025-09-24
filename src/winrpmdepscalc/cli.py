@@ -2,6 +2,8 @@ import argparse
 import sys
 from pathlib import Path
 import urllib3
+import importlib.metadata
+
 from .config import Config
 from .downloader import Downloader
 from .metadata_manager import MetadataManager
@@ -19,10 +21,15 @@ from .operations import (
 )
 from .utils import _logger
 
+__version__ = importlib.metadata.version("winrpmdepscalc")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Windows RPM Package Metadata Tool")
+        description="Windows RPM Package Metadata Tool"
+    )
+    parser.add_argument('--version', action='version',
+                        version=f'%(prog)s {__version__}')
     parser.add_argument('-c', '--config', type=Path,
                         default=Path("config.yaml"), help="YAML config file path")
     parser.add_argument('--write-default-config', action='store_true',
@@ -64,15 +71,22 @@ def main() -> None:
 
         if config.SKIP_SSL_VERIFY:
             _logger.warning(
-                "SSL verification disabled; HTTPS requests insecure.")
+                "SSL verification disabled; HTTPS requests insecure."
+            )
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
         downloader = Downloader(
-            config.DOWNLOADER, skip_ssl_verify=config.SKIP_SSL_VERIFY)
+            config.DOWNLOADER, skip_ssl_verify=config.SKIP_SSL_VERIFY
+        )
         metadata = MetadataManager(config, downloader)
 
-        needs_metadata = any([args.list_packages, args.calc_deps is not None,
-                              args.refresh_meta, args.list_rpm_urls, args.download])
+        needs_metadata = any([
+            args.list_packages,
+            args.calc_deps is not None,
+            args.refresh_meta,
+            args.list_rpm_urls,
+            args.download,
+        ])
 
         if needs_metadata:
             metadata.check_and_refresh_metadata()
@@ -114,7 +128,8 @@ def main() -> None:
             run_interactive_menu(metadata, args.config)
         else:
             _logger.warning(
-                "No operation specified and interactive mode disabled.")
+                "No operation specified and interactive mode disabled."
+            )
 
     except KeyboardInterrupt:
         _logger.warning("\nTerminated by user (Ctrl+C). Exiting...")

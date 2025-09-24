@@ -5,13 +5,15 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
-      contents: write
 
     steps:
       - name: Checkout code
@@ -30,16 +32,10 @@ jobs:
       - name: Build package
         run: python -m build
 
-      - name: Create GitHub Release
-        id: create_release
+      - name: Create GitHub Release and Upload Assets
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}
-
-      - name: Upload assets to GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
           files: |
             dist/*.tar.gz
             dist/*.whl

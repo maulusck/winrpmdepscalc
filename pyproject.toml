@@ -1,10 +1,9 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=80", "wheel", "setuptools_scm[toml]>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "winrpmdepscalc"
-version = "1.0.0"
 description = "Windows RPM Package Metadata Calculator Tool"
 authors = [{ name = "Maulusck✖Perplexity", email = "maulusck@pm.me" }]
 license = "WTFPL"
@@ -16,11 +15,14 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
 ]
-
 dependencies = ["requests", "PyYAML", "tqdm", "urllib3"]
+dynamic = ["version"]
 
 [project.urls]
 Home-page = "https://github.com/maulusck/winrpmdepscalc"
 
 [project.scripts]
 winrpmdepscalc = "winrpmdepscalc.cli:main"
+
+[tool.setuptools_scm]
+# optionally configure setuptools_scm here
