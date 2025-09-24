@@ -33,7 +33,7 @@ jobs:
         id: pypi-publish
         uses: pypa/gh-action-pypi-publish@v1.5.0
         with:
-          publish_dir: dist
+          packages_dir: dist
 
       - name: Publish to PyPI using OIDC token
         env:
