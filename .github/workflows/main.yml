@@ -29,14 +29,14 @@ jobs:
       - name: Build the package
         run: python -m build
 
-      - name: Publish to PyPI using OIDC token
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ steps.pypi-publish.outputs.token }}
-        run: python -m twine upload dist/*
-
       - name: Get PyPI OIDC token
         id: pypi-publish
         uses: pypa/gh-action-pypi-publish@v1.5.0
         with:
           publish_dir: dist
+
+      - name: Publish to PyPI using OIDC token
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ steps.pypi-publish.outputs.token }}
+        run: python -m twine upload dist/*
