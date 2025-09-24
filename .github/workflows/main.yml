@@ -3,12 +3,12 @@ name: Publish Python Package
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags like v1.0, v2.0, etc.
+      - "v*"
 
 permissions:
   contents: read
   packages: write
-  id-token: write  # Needed to request OIDC token for PyPI
+  id-token: write
 
 jobs:
   publish:
@@ -21,7 +21,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.x'
+          python-version: "3.x"
 
       - name: Install build and twine
         run: python -m pip install --upgrade build twine
