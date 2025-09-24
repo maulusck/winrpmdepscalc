@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*" # On version tags like v1.0.0
+      - "v*"
 
 jobs:
   build-and-publish:
@@ -11,6 +11,7 @@ jobs:
     environment: pypi
     permissions:
       id-token: write
+      contents: write
 
     steps:
       - name: Checkout code
