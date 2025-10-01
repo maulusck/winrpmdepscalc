@@ -1,24 +1,21 @@
-import functools
-import fnmatch
-import lzma
-import gzip
 import bz2
+import fnmatch
+import functools
+import gzip
+import logging
+import lzma
 import xml.etree.ElementTree as ET
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Optional, List, Dict, Set
+from typing import Dict, List, Optional, Set
 from urllib.parse import urljoin
-import logging
 
 _logger = logging.getLogger("winrpmdepscalc")
 
 
 class MetadataManager:
     NS_REPO = {"repo": "http://linux.duke.edu/metadata/repo"}
-    NS_COMMON = {
-        "common": "http://linux.duke.edu/metadata/common",
-        "rpm": "http://linux.duke.edu/metadata/rpm"
-    }
+    NS_COMMON = {"common": "http://linux.duke.edu/metadata/common", "rpm": "http://linux.duke.edu/metadata/rpm"}
 
     def __init__(self, config, downloader) -> None:
         self.config = config
@@ -32,19 +29,13 @@ class MetadataManager:
         self.repomd_root: Optional[ET.Element] = None
 
     def check_and_refresh_metadata(self, force_refresh: bool = False) -> None:
-        required_files = [
-            self.config.LOCAL_REPOMD_FILE,
-            self.config.LOCAL_XZ_FILE,
-            self.config.LOCAL_XML_FILE
-        ]
+        required_files = [self.config.LOCAL_REPOMD_FILE, self.config.LOCAL_XZ_FILE, self.config.LOCAL_XML_FILE]
         missing = [str(f) for f in required_files if not f.exists()]
         if missing or force_refresh:
-            _logger.warning(
-                f"Missing or refresh forced for metadata files: {', '.join(missing)}")
+            _logger.warning(f"Missing or refresh forced for metadata files: {', '.join(missing)}")
             _logger.info("Refreshing metadata...")
 
-            repomd_url = urljoin(self.config.REPO_BASE_URL,
-                                 self.config.REPOMD_XML)
+            repomd_url = urljoin(self.config.REPO_BASE_URL, self.config.REPOMD_XML)
             self.downloader.download(repomd_url, self.config.LOCAL_REPOMD_FILE)
 
             self.repomd_root = self._parse_xml(self.config.LOCAL_REPOMD_FILE)
@@ -56,8 +47,7 @@ class MetadataManager:
                 raise RuntimeError("Primary URL not found in repomd.xml")
 
             self.downloader.download(primary_url, self.config.LOCAL_XZ_FILE)
-            self._decompress_file(self.config.LOCAL_XZ_FILE,
-                                  self.config.LOCAL_XML_FILE)
+            self._decompress_file(self.config.LOCAL_XZ_FILE, self.config.LOCAL_XML_FILE)
 
             self._reset_metadata_state()
             self.primary_root = self._parse_xml(self.config.LOCAL_XML_FILE)
@@ -70,8 +60,7 @@ class MetadataManager:
             if not self.metadata_loaded:
                 self.primary_root = self._parse_xml(self.config.LOCAL_XML_FILE)
                 if self.primary_root is None:
-                    raise RuntimeError(
-                        "Failed to parse primary XML metadata on startup")
+                    raise RuntimeError("Failed to parse primary XML metadata on startup")
                 self._load_metadata_maps()
                 self.metadata_loaded = True
 
@@ -124,14 +113,14 @@ class MetadataManager:
         _logger.info(f"Decompressing {input_path} to {output_path}...")
 
         decompressors = [
-            ('gzip', gzip.open),
-            ('bzip2', bz2.open),
-            ('xz', lzma.open),
+            ("gzip", gzip.open),
+            ("bzip2", bz2.open),
+            ("xz", lzma.open),
         ]
 
         for name, opener in decompressors:
             try:
-                with opener(input_path, 'rb') as f_in, open(output_path, 'wb') as f_out:
+                with opener(input_path, "rb") as f_in, open(output_path, "wb") as f_out:
                     f_out.write(f_in.read())
                 _logger.info(f"Decompression complete using {name}.")
                 return
@@ -178,31 +167,22 @@ class MetadataManager:
 
         for pkg_name, fmt in pkgs_with_format:
             req = fmt.find("rpm:requires", ns)
-            req_set = {
-                entry.get("name")
-                for entry in req.findall("rpm:entry", ns)
-            } if req is not None else set()
+            req_set = {entry.get("name") for entry in req.findall("rpm:entry", ns)} if req is not None else set()
 
             if self.config.SUPPORT_WEAK_DEPS:
                 weak = fmt.find("rpm:weakrequires", ns)
                 if weak is not None:
-                    req_set.update(entry.get("name")
-                                   for entry in weak.findall("rpm:entry", ns))
+                    req_set.update(entry.get("name") for entry in weak.findall("rpm:entry", ns))
             self.requires_map[pkg_name] = req_set
 
         self.dep_map = {
-            pkg: {
-                dep for req in reqs if req in self.provides_map for dep in self.provides_map[req]
-            }
+            pkg: {dep for req in reqs if req in self.provides_map for dep in self.provides_map[req]}
             for pkg, reqs in self.requires_map.items()
         }
 
     def filter_packages(self, patterns: List[str]) -> List[str]:
         patterns = [p.strip() for p in patterns if p.strip()]
-        return sorted(
-            pkg for pkg in self.all_packages
-            if any(fnmatch.fnmatch(pkg, pat) for pat in patterns)
-        )
+        return sorted(pkg for pkg in self.all_packages if any(fnmatch.fnmatch(pkg, pat) for pat in patterns))
 
     @functools.lru_cache(maxsize=None)
     def resolve_all_dependencies(self, pkg_name: str) -> Optional[Set[str]]:

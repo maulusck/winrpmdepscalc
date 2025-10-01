@@ -1,5 +1,5 @@
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
 
 class Config:
@@ -30,12 +30,11 @@ class Config:
                         self.LOCAL_XZ_FILE = temp_dir / "primary.xml.xz"
                         self.LOCAL_XML_FILE = temp_dir / "primary.xml"
                 else:
-                    setattr(self, key_upper, value if not isinstance(
-                        getattr(self, key_upper), Path) else Path(value))
+                    setattr(self, key_upper, value if not isinstance(getattr(self, key_upper), Path) else Path(value))
 
     def to_dict(self) -> dict:
         return {
-            k: (str(getattr(self, k)) if isinstance(
-                getattr(self, k), Path) else getattr(self, k))
-            for k in dir(self) if k.isupper()
+            k: (str(getattr(self, k)) if isinstance(getattr(self, k), Path) else getattr(self, k))
+            for k in dir(self)
+            if k.isupper()
         }

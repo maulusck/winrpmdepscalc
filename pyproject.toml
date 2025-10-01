@@ -26,3 +26,10 @@ winrpmdepscalc = "winrpmdepscalc.cli:main"
 
 [tool.setuptools_scm]
 # optionally configure setuptools_scm here
+
+[tool.black]
+line-length = 120
+
+[tool.isort]
+profile = "black"
+line_length = 120

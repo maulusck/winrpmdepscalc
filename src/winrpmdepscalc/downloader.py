@@ -1,10 +1,11 @@
+import logging
 import subprocess
 from enum import Enum
-from typing import Optional, Union
 from pathlib import Path
+from typing import Optional, Union
+
 import requests
 from tqdm import tqdm
-import logging
 
 _logger = logging.getLogger("winrpmdepscalc")
 
@@ -19,12 +20,13 @@ class DownloaderType(Enum):
 
 
 class Downloader:
-    def __init__(self, downloader_type: str = "powershell", proxy_url: Optional[str] = None, skip_ssl_verify: bool = True) -> None:
+    def __init__(
+        self, downloader_type: str = "powershell", proxy_url: Optional[str] = None, skip_ssl_verify: bool = True
+    ) -> None:
         dt = downloader_type.lower()
         if not DownloaderType.has_value(dt):
-            allowed = ', '.join(d.value for d in DownloaderType)
-            raise ValueError(
-                f"Invalid downloader '{downloader_type}'. Allowed: {allowed}")
+            allowed = ", ".join(d.value for d in DownloaderType)
+            raise ValueError(f"Invalid downloader '{downloader_type}'. Allowed: {allowed}")
         self.downloader_type = DownloaderType(dt)
         if self.downloader_type == DownloaderType.PYTHON:
             self.session = requests.Session()
@@ -48,15 +50,10 @@ class Downloader:
             f"$wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials; "
             f"$wc.DownloadFile('{url}', '{output_file}');"
         )
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_script],
-            capture_output=True, text=True
-        )
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], capture_output=True, text=True)
         if result.returncode != 0:
-            _logger.error(
-                f"PowerShell download failed:\n{result.stderr.strip()}")
-            raise RuntimeError(
-                f"PowerShell download failed:\n{result.stderr.strip()}")
+            _logger.error(f"PowerShell download failed:\n{result.stderr.strip()}")
+            raise RuntimeError(f"PowerShell download failed:\n{result.stderr.strip()}")
         _logger.info(f"Downloaded {output_file} via PowerShell")
 
     def _download_python(self, url: str, output_file: Union[str, Path]) -> None:
@@ -66,8 +63,8 @@ class Downloader:
             with self.session.get(url, stream=True) as resp:
                 resp.raise_for_status()
                 total = int(resp.headers.get("content-length", 0))
-                with open(output_file, 'wb') as f, tqdm(
-                    total=total, unit='iB', unit_scale=True, desc=Path(output_file).name
+                with open(output_file, "wb") as f, tqdm(
+                    total=total, unit="iB", unit_scale=True, desc=Path(output_file).name
                 ) as bar:
                     for chunk in resp.iter_content(chunk_size=1024):
                         if chunk:

@@ -1,24 +1,24 @@
-from .downloader import Downloader, DownloaderType
-from .config import Config
-from .metadata_manager import MetadataManager
 from .cli import main
+from .config import Config
+from .downloader import Downloader, DownloaderType
+from .metadata_manager import MetadataManager
 from .operations import (
-    parse_package_names,
-    select_packages,
-    print_packages_tabular,
-    get_package_rpm_urls,
-    download_packages,
-    load_config_file,
-    write_default_config,
-    print_config,
-    edit_configuration,
-    list_packages,
     calc_dependencies,
-    refresh_metadata,
     cleanup_metadata,
-    list_rpm_urls,
-    download_packages_ui,
     configure_settings,
+    download_packages,
+    download_packages_ui,
+    edit_configuration,
     exit_program,
+    get_package_rpm_urls,
+    list_packages,
+    list_rpm_urls,
+    load_config_file,
+    parse_package_names,
+    print_config,
+    print_packages_tabular,
+    refresh_metadata,
     run_interactive_menu,
+    select_packages,
+    write_default_config,
 )
